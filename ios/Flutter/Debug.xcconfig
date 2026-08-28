@@ -1,0 +1,5 @@
+#include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
+#include "Generated.xcconfig"
+// Xcode strips the caller's DEVELOPER_DIR from some native-assets phases.
+// Resolve xcrun through the project wrapper so Flutter hooks use full Xcode.
+PATH=$(PROJECT_DIR)/../scripts/xcode-bin:$(HOME)/.cargo/bin:/opt/homebrew/opt/rustup/bin:/opt/homebrew/bin:$(inherited)

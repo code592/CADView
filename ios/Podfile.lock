@@ -1,0 +1,48 @@
+PODS:
+  - cad_native (0.0.1):
+    - Flutter
+  - file_picker_darwin (1.0.0):
+    - Flutter
+    - FlutterMacOS
+  - Flutter (1.0.0)
+  - Google-Mobile-Ads-SDK (13.9.0):
+    - GoogleUserMessagingPlatform (>= 1.1)
+  - GoogleUserMessagingPlatform (3.1.0)
+  - pdfium_flutter (0.1.5):
+    - Flutter
+    - FlutterMacOS
+
+DEPENDENCIES:
+  - cad_native (from `.symlinks/plugins/cad_native/ios`)
+  - file_picker_darwin (from `.symlinks/plugins/file_picker_darwin/darwin`)
+  - Flutter (from `Flutter`)
+  - Google-Mobile-Ads-SDK
+  - GoogleUserMessagingPlatform
+  - pdfium_flutter (from `.symlinks/plugins/pdfium_flutter/darwin`)
+
+SPEC REPOS:
+  trunk:
+    - Google-Mobile-Ads-SDK
+    - GoogleUserMessagingPlatform
+
+EXTERNAL SOURCES:
+  cad_native:
+    :path: ".symlinks/plugins/cad_native/ios"
+  file_picker_darwin:
+    :path: ".symlinks/plugins/file_picker_darwin/darwin"
+  Flutter:
+    :path: Flutter
+  pdfium_flutter:
+    :path: ".symlinks/plugins/pdfium_flutter/darwin"
+
+SPEC CHECKSUMS:
+  cad_native: a56d8f28b449e744a3d38c6ee57460d43daab51e
+  file_picker_darwin: 65c8ed1d70cc2ea0b81ae1840db93f8d9c051d19
+  Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
+  Google-Mobile-Ads-SDK: cec761d0da669c462bcc19cd16c747498b9f39f7
+  GoogleUserMessagingPlatform: befe603da6501006420c206222acd449bba45a9c
+  pdfium_flutter: e5a6e881af0b182d5b0465ebad23a8a20caa28d4
+
+PODFILE CHECKSUM: f061a7a28afc5fdb8279780aa1a3dff1a711b5b0
+
+COCOAPODS: 1.17.0

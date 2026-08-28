@@ -1,0 +1,20 @@
+[package]
+name = "cad-formats"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+acadrust = "=0.4.1"
+base64 = "0.22"
+cad-core = { path = "../cad-core", version = "0.1.0" }
+dxf = "0.6.1"
+flate2 = "1.1"
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions"] }
+roxmltree = "0.20"
+stl_io = "0.8"
+tobj = "4.0"
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3.22"

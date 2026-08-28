@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.1'
+          channel: stable
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: flutter pub get
+      - run: dart format --output=none --set-exit-if-changed lib test
+      - run: flutter analyze
+      - run: flutter test
+      - run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+      - run: cargo test --manifest-path rust/Cargo.toml --workspace --locked
+      - run: bash scripts/verify_offline_manifest.sh
+
+  android-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.1'
+          channel: stable
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - run: flutter pub get
+      - run: flutter build apk --debug --flavor community --dart-define=CADVIEW_DISTRIBUTION=community
+      - run: flutter build apk --debug --flavor cnViewer --dart-define=CADVIEW_DISTRIBUTION=cnViewer
+      - run: flutter build apk --debug --flavor cnPro --dart-define=CADVIEW_DISTRIBUTION=cnPro
+      - run: flutter build apk --debug --flavor globalStore --dart-define=CADVIEW_DISTRIBUTION=globalStore
+      - run: ./gradlew :app:dependencies --configuration communityDebugRuntimeClasspath > community-dependencies.txt
+        working-directory: android
+      - run: ./gradlew :app:dependencies --configuration cnViewerDebugRuntimeClasspath > cnViewer-dependencies.txt
+        working-directory: android
+      - run: ./gradlew :app:dependencies --configuration cnProDebugRuntimeClasspath > cnPro-dependencies.txt
+        working-directory: android
+      - run: '! grep -q "play-services-ads" android/community-dependencies.txt'
+      - run: '! grep -q "play-services-ads" android/cnViewer-dependencies.txt'
+      - run: '! grep -q "play-services-ads" android/cnPro-dependencies.txt'
+      - run: ./gradlew :app:processCommunityReleaseMainManifest :app:processCnViewerReleaseMainManifest :app:processCnProReleaseMainManifest
+        working-directory: android
+      - run: bash scripts/verify_offline_manifest.sh
+
+  ios-simulator:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.1'
+          channel: stable
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - run: bash scripts/maintain_ios.sh --build community
+      - run: bash scripts/maintain_ios.sh --build cnViewer
+      - run: bash scripts/maintain_ios.sh --build cnPro
+      - run: bash scripts/maintain_ios.sh --build globalStore
+
+  compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: rust/Cargo.toml
+      - run: cargo install cargo-cyclonedx --locked
+      - run: cargo cyclonedx --manifest-path rust/Cargo.toml --format json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-cyclonedx-sbom
+          path: rust/*.cdx.json

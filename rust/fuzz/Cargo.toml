@@ -1,0 +1,20 @@
+[package]
+name = "cad-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+cad-core = { path = "../crates/cad-core", version = "0.1.0" }
+cad-formats = { path = "../crates/cad-formats", version = "0.1.0" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "format_entrypoints"
+path = "fuzz_targets/format_entrypoints.rs"
+test = false
+doc = false
+bench = false

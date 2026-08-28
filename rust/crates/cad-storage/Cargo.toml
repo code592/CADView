@@ -1,0 +1,15 @@
+[package]
+name = "cad-storage"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+cad-core = { path = "../cad-core", version = "0.1.0" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3.22"
+uuid = { version = "1.18", features = ["v4"] }

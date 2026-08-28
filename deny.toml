@@ -1,0 +1,31 @@
+[graph]
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+  { id = "RUSTSEC-2024-0436", reason = "Transitive paste dependency from acadrust/nalgebra; unmaintained but no known vulnerability, pending upstream replacement." },
+]
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

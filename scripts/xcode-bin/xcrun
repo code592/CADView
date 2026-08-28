@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+CADVIEW_XCODE_APP="${CADVIEW_XCODE_APP:-/Applications/Xcode.app}"
+export DEVELOPER_DIR="$CADVIEW_XCODE_APP/Contents/Developer"
+exec /usr/bin/xcrun "$@"
