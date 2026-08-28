@@ -1,5 +1,6 @@
 package org.cadview.cad_view
 
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -11,9 +12,39 @@ import java.util.UUID
 import kotlin.concurrent.thread
 
 open class CadViewActivityBase : FlutterActivity() {
+    companion object {
+        private const val PICK_DOCUMENT_REQUEST = 0x4341
+        private val CAD_DOCUMENT_MIME_TYPES = arrayOf(
+            "application/pdf",
+            "image/svg+xml",
+            "application/dwg",
+            "application/acad",
+            "application/x-acad",
+            "image/vnd.dwg",
+            "application/dxf",
+            "application/x-dxf",
+            "image/vnd.dxf",
+            "model/stl",
+            "application/vnd.ms-pki.stl",
+            "application/sla",
+            "model/obj",
+            "model/gltf+json",
+            "model/gltf-binary",
+            "model/3mf",
+            "application/vnd.ms-package.3dmanufacturing-3dmodel+xml",
+            // Providers commonly label ASCII DXF/OBJ, glTF, and binary CAD
+            // files with generic types. Dart still validates the extension and
+            // Rust probes the bytes after selection.
+            "text/plain",
+            "application/json",
+            "application/octet-stream",
+        )
+    }
+
     private val pendingIncomingUris = mutableListOf<Uri>()
     private val incomingLock = Any()
     private var incomingFilesChannel: MethodChannel? = null
+    private var pendingDocumentPickerResult: MethodChannel.Result? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -38,7 +69,65 @@ open class CadViewActivityBase : FlutterActivity() {
                 }
             }
         }
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "org.cadview/document_picker",
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "pickDocument" -> launchDocumentPicker(result)
+                else -> result.notImplemented()
+            }
+        }
         enqueueIncomingIntent(intent, notifyFlutter = false)
+    }
+
+    private fun launchDocumentPicker(result: MethodChannel.Result) {
+        if (pendingDocumentPickerResult != null) {
+            result.error("already_active", "Document picker is already active", null)
+            return
+        }
+        val picker = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+            putExtra(Intent.EXTRA_MIME_TYPES, CAD_DOCUMENT_MIME_TYPES)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        if (picker.resolveActivity(packageManager) == null) {
+            result.error("picker_unavailable", "No system document picker is available", null)
+            return
+        }
+        pendingDocumentPickerResult = result
+        @Suppress("DEPRECATION")
+        startActivityForResult(picker, PICK_DOCUMENT_REQUEST)
+    }
+
+    @Deprecated("Deprecated in Android")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode != PICK_DOCUMENT_REQUEST) {
+            super.onActivityResult(requestCode, resultCode, data)
+            return
+        }
+        val result = pendingDocumentPickerResult ?: return
+        pendingDocumentPickerResult = null
+        if (resultCode != Activity.RESULT_OK) {
+            result.success(null)
+            return
+        }
+        val uri = data?.data
+        if (uri == null) {
+            result.error("missing_document", "The picker did not return a document", null)
+            return
+        }
+        thread(name = "cadview-file-import", isDaemon = true) {
+            val path = copyIncomingFile(uri)
+            runOnUiThread {
+                if (path == null) {
+                    result.error("document_import_failed", "Unable to read the selected file", null)
+                } else {
+                    result.success(path)
+                }
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

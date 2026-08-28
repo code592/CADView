@@ -8,6 +8,7 @@ import '../../core/cad_engine.dart';
 import '../../core/cad_file_types.dart';
 import '../../core/distribution.dart';
 import '../../core/incoming_documents.dart';
+import '../../core/native_document_picker.dart';
 import '../../core/native_paths.dart';
 import '../../core/privacy_preferences.dart';
 import '../../l10n/app_localizations.dart';
@@ -265,11 +266,37 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _pickDocument() async {
     final allowedExtensions = await _allowedExtensions;
     if (!mounted) return;
-    final file = await FilePicker.pickFile(
-      type: FileType.custom,
-      allowedExtensions: allowedExtensions,
-    );
-    if (file != null && !hasCadExtension(file.name, allowedExtensions)) {
+    String? path;
+    String? selectedName;
+    if (Platform.isAndroid) {
+      path = await NativeDocumentPicker.pickDocument();
+      selectedName = path == null ? null : File(path).uri.pathSegments.last;
+    } else {
+      final file = await FilePicker.pickFile(
+        type: FileType.custom,
+        allowedExtensions: allowedExtensions,
+      );
+      selectedName = file?.name;
+      path = file?.path;
+      if (file != null && path == null) {
+        final importDirectory = Directory(
+          '${await NativePaths.applicationSupport()}${Platform.pathSeparator}imports',
+        );
+        await importDirectory.create(recursive: true);
+        final safeName = file.name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+        path =
+            '${importDirectory.path}${Platform.pathSeparator}'
+            '${DateTime.now().microsecondsSinceEpoch}_$safeName';
+        final output = File(path).openWrite();
+        await for (final chunk in file.xFile.openRead()) {
+          output.add(chunk);
+        }
+        await output.flush();
+        await output.close();
+      }
+    }
+    if (selectedName != null &&
+        !hasCadExtension(selectedName, allowedExtensions)) {
       if (mounted) {
         setState(() {
           _error = context.l10n.text('unsupportedFileType', {
@@ -281,23 +308,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       return;
     }
-    var path = file?.path;
-    if (file != null && path == null) {
-      final importDirectory = Directory(
-        '${await NativePaths.applicationSupport()}${Platform.pathSeparator}imports',
-      );
-      await importDirectory.create(recursive: true);
-      final safeName = file.name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-      path =
-          '${importDirectory.path}${Platform.pathSeparator}'
-          '${DateTime.now().microsecondsSinceEpoch}_$safeName';
-      final output = File(path).openWrite();
-      await for (final chunk in file.xFile.openRead()) {
-        output.add(chunk);
-      }
-      await output.flush();
-      await output.close();
-    }
     if (path == null || !mounted) return;
     await _openDocumentPath(path);
   }
@@ -305,6 +315,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _openDocumentPath(String path) async {
     await _waitUntilResumed();
     if (!mounted) return;
+    // Lifecycle observers are not guaranteed to be notified in registration
+    // order. Synchronize the native core before beginOpenDocument so an
+    // incoming intent cannot observe the previous background state.
+    widget.engine.setApplicationBackgrounded(false);
     setState(() {
       _opening = true;
       _openProgress = 0;
@@ -352,6 +366,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _applicationResumed = state == AppLifecycleState.resumed;
+    widget.engine.setApplicationBackgrounded(!_applicationResumed);
     if (!_applicationResumed) return;
     final completer = _resumeCompleter;
     _resumeCompleter = null;

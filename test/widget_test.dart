@@ -39,6 +39,23 @@ void main() {
     expect(find.text('Dual scene core'), findsNothing);
   });
 
+  testWidgets('foreground lifecycle is synchronized to the native engine', (
+    tester,
+  ) async {
+    final engine = _FakeCadEngine();
+    await tester.pumpWidget(CadViewApp(engine: engine));
+    await tester.pumpAndSettle();
+    engine.backgroundStates.clear();
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    await tester.pump();
+    expect(engine.backgroundStates, contains(true));
+
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(engine.backgroundStates.last, isFalse);
+  });
+
   testWidgets('language can be changed from system default in settings', (
     tester,
   ) async {
@@ -116,6 +133,8 @@ void main() {
 }
 
 class _FakeCadEngine implements CadEngine {
+  final List<bool> backgroundStates = [];
+
   @override
   Future<List<CadTextAnnotation>> deleteAnnotation(
     BigInt sessionId,
@@ -177,7 +196,9 @@ class _FakeCadEngine implements CadEngine {
   void cancelCurrentOpen() {}
 
   @override
-  void setApplicationBackgrounded(bool backgrounded) {}
+  void setApplicationBackgrounded(bool backgrounded) {
+    backgroundStates.add(backgrounded);
+  }
 
   @override
   Future<void> closeDocument(BigInt sessionId) async {}
