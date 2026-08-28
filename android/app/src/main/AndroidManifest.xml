@@ -27,25 +27,71 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- Accept engineering documents from file managers, mail clients,
-                 cloud drives, browsers, and other apps. Rust probes the file
-                 signature after import, so Android MIME labels and extensions
-                 are intentionally not trusted here. -->
+            <!-- Only advertise formats that have an available backend. Rust
+                 still probes the imported bytes and never trusts MIME alone. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW"/>
                 <category android:name="android.intent.category.DEFAULT"/>
                 <category android:name="android.intent.category.BROWSABLE"/>
-                <data android:mimeType="*/*"/>
+                <data android:mimeType="application/pdf"/>
+                <data android:mimeType="image/svg+xml"/>
+                <data android:mimeType="application/dxf"/>
+                <data android:mimeType="application/x-dxf"/>
+                <data android:mimeType="image/vnd.dxf"/>
+                <data android:mimeType="application/dwg"/>
+                <data android:mimeType="application/acad"/>
+                <data android:mimeType="application/x-acad"/>
+                <data android:mimeType="image/vnd.dwg"/>
+                <data android:mimeType="model/stl"/>
+                <data android:mimeType="application/vnd.ms-pki.stl"/>
+                <data android:mimeType="model/obj"/>
+                <data android:mimeType="application/x-tgif"/>
+                <data android:mimeType="model/gltf+json"/>
+                <data android:mimeType="model/gltf-binary"/>
+                <data android:mimeType="model/3mf"/>
+                <data android:mimeType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND"/>
                 <category android:name="android.intent.category.DEFAULT"/>
-                <data android:mimeType="*/*"/>
+                <data android:mimeType="application/pdf"/>
+                <data android:mimeType="image/svg+xml"/>
+                <data android:mimeType="application/dxf"/>
+                <data android:mimeType="application/x-dxf"/>
+                <data android:mimeType="image/vnd.dxf"/>
+                <data android:mimeType="application/dwg"/>
+                <data android:mimeType="application/acad"/>
+                <data android:mimeType="application/x-acad"/>
+                <data android:mimeType="image/vnd.dwg"/>
+                <data android:mimeType="model/stl"/>
+                <data android:mimeType="application/vnd.ms-pki.stl"/>
+                <data android:mimeType="model/obj"/>
+                <data android:mimeType="application/x-tgif"/>
+                <data android:mimeType="model/gltf+json"/>
+                <data android:mimeType="model/gltf-binary"/>
+                <data android:mimeType="model/3mf"/>
+                <data android:mimeType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND_MULTIPLE"/>
                 <category android:name="android.intent.category.DEFAULT"/>
-                <data android:mimeType="*/*"/>
+                <data android:mimeType="application/pdf"/>
+                <data android:mimeType="image/svg+xml"/>
+                <data android:mimeType="application/dxf"/>
+                <data android:mimeType="application/x-dxf"/>
+                <data android:mimeType="image/vnd.dxf"/>
+                <data android:mimeType="application/dwg"/>
+                <data android:mimeType="application/acad"/>
+                <data android:mimeType="application/x-acad"/>
+                <data android:mimeType="image/vnd.dwg"/>
+                <data android:mimeType="model/stl"/>
+                <data android:mimeType="application/vnd.ms-pki.stl"/>
+                <data android:mimeType="model/obj"/>
+                <data android:mimeType="application/x-tgif"/>
+                <data android:mimeType="model/gltf+json"/>
+                <data android:mimeType="model/gltf-binary"/>
+                <data android:mimeType="model/3mf"/>
+                <data android:mimeType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
             </intent-filter>
         </activity>
         <!-- Don't delete the meta-data below.

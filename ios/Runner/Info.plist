@@ -10,17 +10,6 @@
 	<string>en</string>
 	<key>CFBundleDisplayName</key>
 	<string>CADView</string>
-	<key>CFBundleLocalizations</key>
-	<array>
-		<string>en</string>
-		<string>zh-Hans</string>
-		<string>zh-Hant</string>
-		<string>es</string>
-		<string>ja</string>
-		<string>fr</string>
-		<string>ko</string>
-		<string>ru</string>
-	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -32,7 +21,10 @@
 			<string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>public.data</string>
+				<string>com.adobe.pdf</string>
+				<string>org.cadview.cad-2d</string>
+				<string>org.cadview.svg</string>
+				<string>org.cadview.mesh</string>
 			</array>
 		</dict>
 	</array>
@@ -42,6 +34,17 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+		<string>zh-Hant</string>
+		<string>es</string>
+		<string>ja</string>
+		<string>fr</string>
+		<string>ko</string>
+		<string>ru</string>
+	</array>
 	<key>CFBundleName</key>
 	<string>cad_view</string>
 	<key>CFBundlePackageType</key>
@@ -101,6 +104,82 @@
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>CAD drawing</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.cadview.cad-2d</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>dwg</string>
+					<string>dxf</string>
+					<string>dxb</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>image/vnd.dwg</string>
+					<string>image/vnd.dxf</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.image</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Scalable vector graphic</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.cadview.svg</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>svg</string>
+					<string>svgz</string>
+				</array>
+				<key>public.mime-type</key>
+				<string>image/svg+xml</string>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>3D mesh model</string>
+			<key>UTTypeIdentifier</key>
+			<string>org.cadview.mesh</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>stl</string>
+					<string>obj</string>
+					<string>gltf</string>
+					<string>glb</string>
+					<string>3mf</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>model/stl</string>
+					<string>model/obj</string>
+					<string>model/gltf+json</string>
+					<string>model/gltf-binary</string>
+					<string>model/3mf</string>
+				</array>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>

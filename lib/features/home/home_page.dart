@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/cad_engine.dart';
+import '../../core/cad_file_types.dart';
 import '../../core/distribution.dart';
 import '../../core/incoming_documents.dart';
 import '../../core/native_paths.dart';
@@ -30,9 +31,12 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   StreamSubscription<String>? _incomingFilesSubscription;
   final List<String> _incomingFiles = [];
+  late final Future<List<String>> _allowedExtensions;
+  Completer<void>? _resumeCompleter;
+  bool _applicationResumed = false;
   bool _drainingIncomingFiles = false;
   bool _opening = false;
   double _openProgress = 0;
@@ -43,6 +47,12 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _applicationResumed =
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
+    _allowedExtensions = widget.engine.supportedFormats().then(
+      availableCadExtensions,
+    );
     _incomingFilesSubscription = IncomingDocuments.files.listen(
       _enqueueIncomingFile,
     );
@@ -61,6 +71,8 @@ class _HomePageState extends State<HomePage> {
     _drainingIncomingFiles = true;
     try {
       while (mounted && _incomingFiles.isNotEmpty) {
+        await _waitUntilResumed();
+        if (!mounted) return;
         await _openDocumentPath(_incomingFiles.removeAt(0));
       }
     } finally {
@@ -242,13 +254,33 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _resumeCompleter?.complete();
+    _resumeCompleter = null;
     _incomingFilesSubscription?.cancel();
     widget.advertising.dispose();
     super.dispose();
   }
 
   Future<void> _pickDocument() async {
-    final file = await FilePicker.pickFile(type: FileType.any);
+    final allowedExtensions = await _allowedExtensions;
+    if (!mounted) return;
+    final file = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: allowedExtensions,
+    );
+    if (file != null && !hasCadExtension(file.name, allowedExtensions)) {
+      if (mounted) {
+        setState(() {
+          _error = context.l10n.text('unsupportedFileType', {
+            'formats': allowedExtensions
+                .map((value) => value.toUpperCase())
+                .join(', '),
+          });
+        });
+      }
+      return;
+    }
     var path = file?.path;
     if (file != null && path == null) {
       final importDirectory = Directory(
@@ -271,6 +303,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _openDocumentPath(String path) async {
+    await _waitUntilResumed();
     if (!mounted) return;
     setState(() {
       _opening = true;
@@ -309,6 +342,21 @@ class _HomePageState extends State<HomePage> {
     } finally {
       if (mounted) setState(() => _opening = false);
     }
+  }
+
+  Future<void> _waitUntilResumed() {
+    if (_applicationResumed) return Future<void>.value();
+    return (_resumeCompleter ??= Completer<void>()).future;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _applicationResumed = state == AppLifecycleState.resumed;
+    if (!_applicationResumed) return;
+    final completer = _resumeCompleter;
+    _resumeCompleter = null;
+    if (completer != null && !completer.isCompleted) completer.complete();
+    unawaited(_drainIncomingFiles());
   }
 
   @override

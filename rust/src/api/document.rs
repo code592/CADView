@@ -28,8 +28,8 @@ static VIEWPORTS: Lazy<RwLock<HashMap<u64, NativeViewportState>>> =
 
 const INITIAL_2D_ENTITY_LIMIT: usize = 75_000;
 const VIEWPORT_2D_ENTITY_LIMIT: usize = 150_000;
-const SCENE_CACHE_VERSION: u32 = 2;
-const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-2";
+const SCENE_CACHE_VERSION: u32 = 3;
+const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-3";
 
 struct DocumentSession {
     document: OpenedDocument,

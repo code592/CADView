@@ -2,7 +2,9 @@ use crate::text_normalization::normalize_cad_text;
 use acadrust::{
     entities::{EntityCommon, EntityType as AcadEntity},
     io::dwg::DwgReadOptions,
-    CadDocument, Color as AcadColor, DwgReader,
+    tables::BlockRecord,
+    types::Transform,
+    CadDocument, Color as AcadColor, DwgReader, Handle, Vector3,
 };
 use cad_core::{
     fingerprint, fingerprint_path, CadError, CancellationToken, DiagnosticSeverity,
@@ -206,7 +208,7 @@ fn build_document(
         entities,
         bounds: None,
     };
-    scene.recompute_bounds();
+    recompute_visible_bounds(&mut scene);
     let mut diagnostics = drawing
         .notifications
         .iter()
@@ -285,11 +287,11 @@ struct DisplayRoots<'a> {
 fn display_roots(drawing: &CadDocument) -> DisplayRoots<'_> {
     let model = drawing.block_records.get("*Model_Space");
     let mut entities = model.map_or_else(Vec::new, |record| {
-        record
-            .entity_handles
-            .iter()
-            .filter_map(|handle| drawing.get_entity(*handle))
-            .collect()
+        block_record_entities(
+            drawing,
+            record,
+            Some(drawing.header.model_space_block_handle),
+        )
     });
     if !entities.is_empty() {
         return DisplayRoots {
@@ -299,17 +301,12 @@ fn display_roots(drawing: &CadDocument) -> DisplayRoots<'_> {
         };
     }
 
-    if let Some(layout) = drawing
+    for layout in drawing
         .block_records
         .iter()
         .filter(|record| record.is_paper_space())
-        .find(|record| !record.entity_handles.is_empty())
     {
-        entities = layout
-            .entity_handles
-            .iter()
-            .filter_map(|handle| drawing.get_entity(*handle))
-            .collect();
+        entities = block_record_entities(drawing, layout, None);
         if !entities.is_empty() {
             return DisplayRoots {
                 entities,
@@ -335,6 +332,70 @@ fn display_roots(drawing: &CadDocument) -> DisplayRoots<'_> {
         layout_name: "Model".to_owned(),
         used_fallback_layout: false,
     }
+}
+
+/// DWG block-record handle lists are an acceleration structure, not the sole
+/// source of truth. Some real-world and failsafe-recovered files contain a
+/// partially populated list while every entity still has the correct owner.
+/// Unioning both sources prevents a valid model or block from being truncated.
+fn block_record_entities<'a>(
+    drawing: &'a CadDocument,
+    record: &BlockRecord,
+    additional_owner: Option<Handle>,
+) -> Vec<&'a AcadEntity> {
+    let mut entities = Vec::new();
+    let mut seen = HashSet::new();
+    for handle in &record.entity_handles {
+        if let Some(entity) = drawing.get_entity(*handle) {
+            push_unique_entity(&mut entities, &mut seen, entity);
+        }
+    }
+    for entity in drawing.entities() {
+        let owner = entity.common().owner_handle;
+        let owned_by_record = !record.handle.is_null() && owner == record.handle;
+        let owned_by_alias = additional_owner
+            .filter(|handle| !handle.is_null())
+            .is_some_and(|handle| owner == handle);
+        if owned_by_record || owned_by_alias {
+            push_unique_entity(&mut entities, &mut seen, entity);
+        }
+    }
+    entities
+}
+
+fn push_unique_entity<'a>(
+    entities: &mut Vec<&'a AcadEntity>,
+    seen: &mut HashSet<usize>,
+    entity: &'a AcadEntity,
+) {
+    let identity = entity as *const AcadEntity as usize;
+    if seen.insert(identity) {
+        entities.push(entity);
+    }
+}
+
+fn recompute_visible_bounds(scene: &mut Scene2D) {
+    let visible_layers = scene
+        .layers
+        .iter()
+        .filter(|layer| layer.visible)
+        .map(|layer| layer.id)
+        .collect::<HashSet<_>>();
+    scene.bounds = scene
+        .entities
+        .iter()
+        .filter(|entity| visible_layers.contains(&entity.layer_id))
+        .filter_map(Entity2D::bounds)
+        .fold(None, |current, next| {
+            Some(match current {
+                None => next,
+                Some(mut bounds) => {
+                    bounds.include(next.min);
+                    bounds.include(next.max);
+                    bounds
+                }
+            })
+        });
 }
 
 struct DwgNormalizer<'a> {
@@ -379,7 +440,7 @@ impl DwgNormalizer<'_> {
                 self.unsupported += 1;
                 return Ok(());
             }
-            let exploded = insert.explode_from_document(self.drawing);
+            let exploded = self.explode_insert(insert);
             for child in &exploded {
                 self.append(child, depth + 1, block_stack)?;
             }
@@ -417,6 +478,24 @@ impl DwgNormalizer<'_> {
             self.append(child, depth + 1, block_stack)?;
         }
         Ok(())
+    }
+
+    fn explode_insert(&self, insert: &acadrust::entities::Insert) -> Vec<AcadEntity> {
+        let Some(record) = self.drawing.block_records.get(&insert.block_name) else {
+            return Vec::new();
+        };
+        let mut block_entities = block_record_entities(self.drawing, record, None)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let base = record.base_point;
+        if base.x != 0.0 || base.y != 0.0 || base.z != 0.0 {
+            let shift = Transform::from_translation(Vector3::new(-base.x, -base.y, -base.z));
+            for entity in &mut block_entities {
+                entity.as_entity_mut().apply_transform(&shift);
+            }
+        }
+        insert.explode(&block_entities)
     }
 
     fn push_geometry(&mut self, common: &EntityCommon, geometry: Entity2DGeometry) {
@@ -646,6 +725,82 @@ mod tests {
                 _ => None,
             });
         let (start, end) = line.expect("inserted block line must be visible");
+        assert!((start.x - 101.0).abs() < 1e-6);
+        assert!((start.y - 202.0).abs() < 1e-6);
+        assert!((end.x - 104.0).abs() < 1e-6);
+        assert!((end.y - 206.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn model_space_unions_owner_entities_when_handle_list_is_partial() {
+        let mut source = CadDocument::new();
+        source
+            .add_entity(EntityType::Line(Line::from_coords(
+                0.0, 0.0, 0.0, 10.0, 0.0, 0.0,
+            )))
+            .unwrap();
+        source
+            .add_entity(EntityType::Line(Line::from_coords(
+                0.0, 10.0, 0.0, 10.0, 10.0, 0.0,
+            )))
+            .unwrap();
+        source
+            .block_records
+            .get_mut("*Model_Space")
+            .unwrap()
+            .entity_handles
+            .truncate(1);
+
+        let roots = display_roots(&source);
+        assert_eq!(roots.entities.len(), 2);
+    }
+
+    #[test]
+    fn inserted_block_uses_owner_fallback_and_subtracts_base_point() {
+        let mut source = CadDocument::new();
+        let mut block = BlockRecord::new("OFFSET_PART");
+        block.handle = source.allocate_handle();
+        block.base_point = Vector3::new(10.0, 20.0, 0.0);
+        let block_handle = block.handle;
+        source.block_records.add(block).unwrap();
+
+        let mut line = Line::from_coords(11.0, 22.0, 0.0, 14.0, 26.0, 0.0);
+        line.common.owner_handle = block_handle;
+        source.add_entity(EntityType::Line(line)).unwrap();
+        source
+            .block_records
+            .get_mut("OFFSET_PART")
+            .unwrap()
+            .entity_handles
+            .clear();
+        source
+            .add_entity(EntityType::Insert(Insert::new(
+                "OFFSET_PART",
+                Vector3::new(100.0, 200.0, 0.0),
+            )))
+            .unwrap();
+
+        let opened = build_document(
+            source,
+            None,
+            "offset.dwg",
+            "test".to_owned(),
+            0,
+            &CancellationToken::default(),
+            None,
+        )
+        .unwrap();
+        let SceneDocument::TwoD(scene) = opened.scene else {
+            panic!("expected a 2D scene");
+        };
+        let (start, end) = scene
+            .entities
+            .iter()
+            .find_map(|entity| match entity.geometry {
+                Entity2DGeometry::Line { start, end } => Some((start, end)),
+                _ => None,
+            })
+            .expect("inserted line must be visible");
         assert!((start.x - 101.0).abs() < 1e-6);
         assert!((start.y - 202.0).abs() < 1e-6);
         assert!((end.x - 104.0).abs() < 1e-6);
