@@ -66,6 +66,20 @@ Run all repository checks with `scripts/verify.sh`. Android supports API 26+
 and iOS supports 15.0+. Release signing material is never stored in this
 repository.
 
+An installable Community release APK must be built with all four external
+signing variables. The helper refuses missing credentials and verifies the
+finished APK before reporting success:
+
+```bash
+CADVIEW_ANDROID_KEYSTORE_FILE=/secure/path/community.jks \
+CADVIEW_ANDROID_KEYSTORE_PASSWORD=... \
+CADVIEW_ANDROID_KEY_ALIAS=... \
+CADVIEW_ANDROID_KEY_PASSWORD=... \
+bash scripts/build_signed_community_apk.sh
+```
+
+An unsigned `flutter build apk --release` artifact is not a distributable APK.
+
 On macOS, `scripts/maintain_ios.sh` maintains the project-local Xcode,
 CocoaPods and Rust iOS environment without changing the global Xcode
 selection:

@@ -64,10 +64,41 @@ android {
         }
     }
 
+    val releaseSigningValues = mapOf(
+        "store file" to providers.environmentVariable("CADVIEW_ANDROID_KEYSTORE_FILE").orNull,
+        "store password" to providers
+            .environmentVariable("CADVIEW_ANDROID_KEYSTORE_PASSWORD")
+            .orNull,
+        "key alias" to providers.environmentVariable("CADVIEW_ANDROID_KEY_ALIAS").orNull,
+        "key password" to providers.environmentVariable("CADVIEW_ANDROID_KEY_PASSWORD").orNull,
+    )
+    val suppliedReleaseSigningValues = releaseSigningValues.filterValues { !it.isNullOrBlank() }
+    if (
+        suppliedReleaseSigningValues.isNotEmpty() &&
+        suppliedReleaseSigningValues.size != releaseSigningValues.size
+    ) {
+        val missing = releaseSigningValues.filterValues { it.isNullOrBlank() }.keys.joinToString()
+        throw GradleException("Incomplete Android release signing configuration; missing: $missing")
+    }
+    val externalReleaseSigning = if (suppliedReleaseSigningValues.isNotEmpty()) {
+        signingConfigs.create("externalRelease") {
+            storeFile = file(requireNotNull(releaseSigningValues["store file"]))
+            storePassword = releaseSigningValues["store password"]
+            keyAlias = releaseSigningValues["key alias"]
+            keyPassword = releaseSigningValues["key password"]
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+    } else {
+        null
+    }
+
     buildTypes {
         release {
-            // Intentionally unsigned in source. CI never ships a debug-signed release;
-            // the store pipeline injects the upload signing configuration.
+            // Signing material stays outside the repository. Release/publishing
+            // scripts inject all four CADVIEW_ANDROID_* environment variables.
+            signingConfig = externalReleaseSigning
         }
     }
 }
