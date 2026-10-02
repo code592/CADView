@@ -954,6 +954,7 @@ class CadScenePainter extends CustomPainter {
       String,
       bool,
       String,
+      bool,
     ),
     _CadTextBlockLayout
   >
@@ -1070,7 +1071,8 @@ class CadScenePainter extends CustomPainter {
             final screenHeight =
                 (geometry['height'] as num).toDouble().abs() * transform.scale;
             const fontSize = _cadTextShapeSize;
-            final fontFamily = geometry['font_family'] as String?;
+            final shxOptions = cadShxTextOptions(geometry);
+            final fontFamily = shxOptions.family;
             final background = geometry['background'] as Map<String, dynamic>?;
             final sourceArgb = entity['color_argb'] as int;
             final ink = selected
@@ -1090,6 +1092,7 @@ class CadScenePainter extends CustomPainter {
               heightIsCapHeight: geometry['height_reference'] != 'em',
               lineSpacing: geometry['line_spacing'] as Map<String, dynamic>?,
               columns: _cadTextColumns(geometry, fontSize),
+              cjkEmIsHeight: shxOptions.cjkEmIsHeight,
             );
             final (horizontalScale, verticalScale) = _cadTextScales(
               geometry,
@@ -1979,6 +1982,7 @@ class CadScenePainter extends CustomPainter {
     Map<String, dynamic>? lineSpacing,
     bool naturalLineHeight = false,
     _CadColumnSpec? columns,
+    bool cjkEmIsHeight = false,
   }) {
     final sizeBucket = (fontSize * 2).round();
     final primaryFamily = cadPrimaryFontFamily(fontFamily);
@@ -2000,6 +2004,7 @@ class CadScenePainter extends CustomPainter {
       jsonEncode(spacing ?? const {}),
       naturalLineHeight,
       columns?.cacheKey ?? '',
+      cjkEmIsHeight,
     );
     final existing = _textLayouts.remove(key);
     if (existing != null) {
@@ -2019,6 +2024,7 @@ class CadScenePainter extends CustomPainter {
         runs: styles,
         heightIsCapHeight: heightIsCapHeight,
         naturalLineHeight: natural || naturalLineHeight,
+        cjkEmIsHeight: cjkEmIsHeight,
       ),
       strutStyle: !natural && heightIsCapHeight && spacing != null
           ? cadMTextStrut(sizeBucket / 2, primaryFamily, spacing)
@@ -2420,12 +2426,13 @@ cadTextColumnLayout(Map<String, dynamic> geometry) {
     value,
     Colors.white,
     _cadTextShapeSize,
-    geometry['font_family'] as String?,
+    cadShxTextOptions(geometry).family,
     maxWidth: _cadTextWrapWidth(geometry, _cadTextShapeSize),
     runs: geometry['text_runs'] as List<dynamic>?,
     heightIsCapHeight: geometry['height_reference'] != 'em',
     lineSpacing: geometry['line_spacing'] as Map<String, dynamic>?,
     columns: _cadTextColumns(geometry, _cadTextShapeSize),
+    cjkEmIsHeight: cadShxTextOptions(geometry).cjkEmIsHeight,
   );
   final scale =
       (geometry['height'] as num).toDouble().abs() / _cadTextShapeSize;
@@ -2505,9 +2512,39 @@ TextSpan cadTextSpan(
   List<dynamic>? runs,
   bool heightIsCapHeight = true,
   bool naturalLineHeight = false,
+  bool cjkEmIsHeight = false,
 }) {
   double emSize(String? family, double factor) =>
       fontSize * factor / (heightIsCapHeight ? cadFontCapRatio(family) : 1);
+  final splitCjk = cjkEmIsHeight && heightIsCapHeight;
+  // SHX big fonts draw CJK in a square cell whose height is the text height:
+  // the CJK em is the height itself, not derived from the Latin cap height.
+  List<InlineSpan> segments(String text, double factor) {
+    if (!splitCjk) return [TextSpan(text: text)];
+    final output = <InlineSpan>[];
+    final buffer = StringBuffer();
+    bool? cjk;
+    void flush() {
+      if (buffer.isEmpty) return;
+      output.add(
+        TextSpan(
+          text: buffer.toString(),
+          style: cjk == true ? TextStyle(fontSize: fontSize * factor) : null,
+        ),
+      );
+      buffer.clear();
+    }
+
+    for (final rune in text.runes) {
+      final isCjk = _cadIsCjkRune(rune);
+      if (cjk != null && isCjk != cjk) flush();
+      cjk = isCjk;
+      buffer.writeCharCode(rune);
+    }
+    flush();
+    return output;
+  }
+
   final baseStyle = TextStyle(
     color: color,
     fontFamily: cadPrimaryFontFamily(fontFamily),
@@ -2515,7 +2552,9 @@ TextSpan cadTextSpan(
     fontSize: emSize(fontFamily, 1),
     height: naturalLineHeight ? null : 1,
   );
-  TextSpan plain() => TextSpan(text: value, style: baseStyle);
+  TextSpan plain() => splitCjk
+      ? TextSpan(style: baseStyle, children: segments(value, 1))
+      : TextSpan(text: value, style: baseStyle);
   if (runs == null || runs.isEmpty) return plain();
   bool boundary(int index) =>
       index <= 0 ||
@@ -2524,7 +2563,7 @@ TextSpan cadTextSpan(
           value.codeUnitAt(index) <= 0xdfff &&
           value.codeUnitAt(index - 1) >= 0xd800 &&
           value.codeUnitAt(index - 1) <= 0xdbff);
-  final children = <TextSpan>[];
+  final children = <InlineSpan>[];
   var cursor = 0;
   for (final raw in runs) {
     if (raw is! Map) return plain();
@@ -2544,7 +2583,7 @@ TextSpan cadTextSpan(
     final factor = style['height_factor'] as num? ?? 1;
     if (!factor.isFinite || factor <= 0 || factor > 1024) return plain();
     if (start > cursor) {
-      children.add(TextSpan(text: value.substring(cursor, start)));
+      children.addAll(segments(value.substring(cursor, start), 1));
     }
     final decorations = <TextDecoration>[
       if (style['underline'] == true) TextDecoration.underline,
@@ -2553,7 +2592,10 @@ TextSpan cadTextSpan(
     ];
     children.add(
       TextSpan(
-        text: value.substring(start, end),
+        text: splitCjk ? null : value.substring(start, end),
+        children: splitCjk
+            ? segments(value.substring(start, end), factor.toDouble())
+            : null,
         style: TextStyle(
           fontFamily: cadPrimaryFontFamily(
             style['font_family'] as String? ?? fontFamily,
@@ -2581,10 +2623,22 @@ TextSpan cadTextSpan(
     cursor = end;
   }
   if (cursor < value.length) {
-    children.add(TextSpan(text: value.substring(cursor)));
+    children.addAll(segments(value.substring(cursor), 1));
   }
   return TextSpan(style: baseStyle, children: children);
 }
+
+/// CJK ideographs, kana, Hangul and full-width forms, which SHX big fonts
+/// (not the primary font) draw.
+bool _cadIsCjkRune(int rune) =>
+    (rune >= 0x1100 && rune <= 0x11ff) ||
+    (rune >= 0x2e80 && rune <= 0x9fff) ||
+    (rune >= 0xa960 && rune <= 0xa97f) ||
+    (rune >= 0xac00 && rune <= 0xd7af) ||
+    (rune >= 0xf900 && rune <= 0xfaff) ||
+    (rune >= 0xfe30 && rune <= 0xfe4f) ||
+    (rune >= 0xff00 && rune <= 0xffef) ||
+    (rune >= 0x20000 && rune <= 0x3ffff);
 
 double _cadMTextSpacingFactor(Map<String, dynamic> spacing) {
   final raw = spacing['factor'];
@@ -2619,12 +2673,13 @@ List<double> cadTextLineBaselines(Map<String, dynamic> geometry) {
     geometry['value'] as String,
     Colors.white,
     _cadTextShapeSize,
-    geometry['font_family'] as String?,
+    cadShxTextOptions(geometry).family,
     maxWidth: _cadTextWrapWidth(geometry, _cadTextShapeSize),
     runs: geometry['text_runs'] as List<dynamic>?,
     heightIsCapHeight: geometry['height_reference'] != 'em',
     lineSpacing: geometry['line_spacing'] as Map<String, dynamic>?,
     columns: _cadTextColumns(geometry, _cadTextShapeSize),
+    cjkEmIsHeight: cadShxTextOptions(geometry).cjkEmIsHeight,
   );
   final (_, vertical) = _cadTextScales(
     geometry,
@@ -2679,12 +2734,13 @@ Rect cadTextScreenBounds(
     value,
     Colors.white,
     fontSize,
-    geometry['font_family'] as String?,
+    cadShxTextOptions(geometry).family,
     maxWidth: _cadTextWrapWidth(geometry, fontSize),
     runs: geometry['text_runs'] as List<dynamic>?,
     heightIsCapHeight: geometry['height_reference'] != 'em',
     lineSpacing: geometry['line_spacing'] as Map<String, dynamic>?,
     columns: _cadTextColumns(geometry, fontSize),
+    cjkEmIsHeight: cadShxTextOptions(geometry).cjkEmIsHeight,
   );
   final (horizontalScale, verticalScale) = _cadTextScales(
     geometry,

@@ -146,6 +146,12 @@ flutter:
     - family: CADView Noto Symbols 2
       fonts:
         - asset: assets/fonts/NotoSansSymbols2-Regular.ttf
+    - family: CADView Noto Sans Narrow
+      fonts:
+        - asset: assets/fonts/CADViewNotoSansNarrow-Regular.ttf
+    - family: CADView CAD Symbols
+      fonts:
+        - asset: assets/fonts/CADViewCadSymbols-Regular.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

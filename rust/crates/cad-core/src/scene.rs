@@ -128,6 +128,11 @@ pub enum Entity2DGeometry {
         /// names are intentionally not exposed as font-family names.
         #[serde(default)]
         font_family: Option<String>,
+        /// SHX font files of the source text style. They are not
+        /// redistributable; the renderer uses them to emulate SHX proportions
+        /// with bundled substitute fonts.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shx: Option<ShxFonts2D>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plane: Option<TextPlane2D>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -135,6 +140,43 @@ pub enum Entity2DGeometry {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         text_warnings: Vec<String>,
     },
+}
+
+/// Lowercase SHX file names (primary and big font) of a CAD text style.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShxFonts2D {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub big_font: Option<String>,
+}
+
+impl ShxFonts2D {
+    /// SHX names from a style's primary and big font files. A primary file
+    /// without an extension (for example `txt`) is an SHX font as well.
+    pub fn from_style(font_file: &str, big_font_file: &str) -> Option<Self> {
+        fn shx(file: &str, bare_is_shx: bool) -> Option<String> {
+            let name = file.trim().replace('\\', "/");
+            let name = name
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if name.is_empty() {
+                return None;
+            }
+            match name.rsplit_once('.') {
+                Some((_, extension)) if extension == "shx" => Some(name),
+                None if bare_is_shx => Some(format!("{name}.shx")),
+                _ => None,
+            }
+        }
+        let fonts = Self {
+            font: shx(font_file, true),
+            big_font: shx(big_font_file, true),
+        };
+        (fonts.font.is_some() || fonts.big_font.is_some()).then_some(fonts)
+    }
 }
 
 fn default_text_width_factor() -> f64 {
@@ -574,6 +616,7 @@ mod text_bounds_tests {
                 mirrored_x: true,
                 mirrored_y: false,
                 font_family: None,
+                shx: None,
                 text_runs: Vec::new(),
                 text_warnings: Vec::new(),
                 plane: None,

@@ -146,6 +146,7 @@ impl FormatAdapter for SvgAdapter {
                     mirrored_x: false,
                     mirrored_y: false,
                     font_family: None,
+                    shx: None,
                     text_runs: Vec::new(),
                     text_warnings: Vec::new(),
                     plane: None,

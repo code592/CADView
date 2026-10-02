@@ -28,8 +28,8 @@ static VIEWPORTS: Lazy<RwLock<HashMap<u64, NativeViewportState>>> =
 
 const INITIAL_2D_ENTITY_LIMIT: usize = 250_000;
 // Version 12 includes validated per-mesh volume centroid coordinates.
-const SCENE_CACHE_VERSION: u32 = 28;
-const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-14";
+const SCENE_CACHE_VERSION: u32 = 29;
+const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-15";
 
 struct DocumentSession {
     document: OpenedDocument,

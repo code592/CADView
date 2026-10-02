@@ -381,6 +381,12 @@ fn text_geometry(text: &dxf::entities::Text, drawing: &Drawing) -> Option<Entity
         mirrored_x: text.is_text_backwards(),
         mirrored_y: text.is_text_upside_down(),
         font_family: font_family(style),
+        shx: style.and_then(|style| {
+            cad_core::ShxFonts2D::from_style(
+                &style.primary_font_file_name,
+                &style.big_font_file_name,
+            )
+        }),
         plane: plane(axes),
         text_runs: parsed.runs,
         text_warnings: parsed.warnings,
@@ -530,6 +536,12 @@ fn mtext_geometry(
         mirrored_x: style.is_some_and(|s| s.text_generation_flags & 2 != 0),
         mirrored_y: style.is_some_and(|s| s.text_generation_flags & 4 != 0),
         font_family: font_family(style),
+        shx: style.and_then(|style| {
+            cad_core::ShxFonts2D::from_style(
+                &style.primary_font_file_name,
+                &style.big_font_file_name,
+            )
+        }),
         plane: if default_plane { None } else { plane(axes) },
         text_runs: parsed.runs,
         text_warnings: parsed.warnings,
@@ -4304,5 +4316,141 @@ mod tests {
                 .any(|(s, e)| close(*s, 100.0, 0.0) && close(*e, 100.0, 10.0)));
             assert!(texts.iter().any(|t| t.1 == "R1" && close(t.2, 103.0, 1.0)));
         }
+    }
+
+    #[test]
+    fn shx_styles_and_rebar_codes_reach_the_scene() {
+        let pairs = [
+            "0",
+            "SECTION",
+            "2",
+            "HEADER",
+            "9",
+            "$ACADVER",
+            "1",
+            "AC1015",
+            "0",
+            "ENDSEC",
+            "0",
+            "SECTION",
+            "2",
+            "TABLES",
+            "0",
+            "TABLE",
+            "2",
+            "STYLE",
+            "70",
+            "1",
+            "0",
+            "STYLE",
+            "100",
+            "AcDbSymbolTableRecord",
+            "100",
+            "AcDbTextStyleTableRecord",
+            "2",
+            "说明",
+            "70",
+            "0",
+            "40",
+            "0",
+            "41",
+            "0.8",
+            "50",
+            "0",
+            "71",
+            "0",
+            "42",
+            "2.5",
+            "3",
+            "ebgen.shx",
+            "4",
+            "hztxt.shx",
+            "0",
+            "ENDTAB",
+            "0",
+            "ENDSEC",
+            "0",
+            "SECTION",
+            "2",
+            "ENTITIES",
+            "0",
+            "TEXT",
+            "100",
+            "AcDbEntity",
+            "8",
+            "0",
+            "100",
+            "AcDbText",
+            "10",
+            "0",
+            "20",
+            "0",
+            "30",
+            "0",
+            "40",
+            "3.2",
+            "1",
+            "2%%13316",
+            "7",
+            "说明",
+            "100",
+            "AcDbText",
+            "0",
+            "TEXT",
+            "100",
+            "AcDbEntity",
+            "8",
+            "0",
+            "100",
+            "AcDbText",
+            "10",
+            "0",
+            "20",
+            "10",
+            "30",
+            "0",
+            "40",
+            "3.2",
+            "1",
+            "plain",
+            "100",
+            "AcDbText",
+            "0",
+            "ENDSEC",
+            "0",
+            "EOF",
+        ];
+        let source = pairs.join("\n") + "\n";
+        let opened = DxfAdapter
+            .open(
+                source.as_bytes(),
+                "shx.dxf",
+                None,
+                &CancellationToken::default(),
+                None,
+            )
+            .unwrap();
+        let SceneDocument::TwoD(scene) = opened.scene else {
+            panic!()
+        };
+        let Entity2DGeometry::Text { value, shx, .. } = &scene.entities[0].geometry else {
+            panic!()
+        };
+        assert_eq!(value, "2\u{e133}16");
+        assert_eq!(
+            shx.as_ref(),
+            Some(&cad_core::ShxFonts2D {
+                font: Some("ebgen.shx".to_owned()),
+                big_font: Some("hztxt.shx".to_owned()),
+            })
+        );
+        // The default STANDARD style uses the bare "txt" SHX font.
+        let Entity2DGeometry::Text { shx, .. } = &scene.entities[1].geometry else {
+            panic!()
+        };
+        assert_eq!(
+            shx.as_ref().and_then(|fonts| fonts.font.as_deref()),
+            Some("txt.shx")
+        );
     }
 }

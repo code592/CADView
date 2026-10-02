@@ -180,6 +180,22 @@ pub(crate) struct ParsedCadText {
     pub column_breaks: Vec<u32>,
 }
 
+/// First private-use code point of the bundled "CADView CAD Symbols" font.
+pub(crate) const CAD_REBAR_SYMBOL_BASE: u32 = 0xE130;
+
+/// Chinese structural SHX fonts (tssdeng.shx and compatible) draw codes
+/// 130–133 (`%%130`–`%%133`) as rebar grade symbols: HPB300, HRB335, HRB400
+/// and RRB400. As raw C1 controls they would render as missing-glyph boxes,
+/// so map them to the bundled symbol glyphs.
+fn cad_special_symbol(character: char) -> char {
+    match character as u32 {
+        code @ 0x82..=0x85 => {
+            char::from_u32(CAD_REBAR_SYMBOL_BASE + (code - 0x82)).unwrap_or(character)
+        }
+        _ => character,
+    }
+}
+
 pub(crate) fn parse_mtext(value: &str, base_height: f64) -> ParsedCadText {
     parse_text(value, true, base_height)
 }
@@ -252,7 +268,8 @@ impl TextBuilder {
             self.runs.clear();
         }
         ParsedCadText {
-            value: self.value,
+            // One UTF-16 unit each way, so style-run offsets stay valid.
+            value: self.value.chars().map(cad_special_symbol).collect(),
             runs: self.runs,
             warnings: self.warnings.into_iter().collect(),
             column_breaks: self.column_breaks,
@@ -772,6 +789,18 @@ mod tests {
         let text =
             "Español français Русский Ελληνικά\nالعَرَبِيَّة עברית ภาษาไทย हिन्दी 日本語 한글 e\u{301}";
         assert_eq!(normalize_cad_text(text), text);
+    }
+
+    #[test]
+    fn rebar_grade_codes_map_to_bundled_symbols() {
+        assert_eq!(
+            normalize_single_line_text("%%130 %%131 %%132 %%133 2\u{85}16"),
+            "\u{e130} \u{e131} \u{e132} \u{e133} 2\u{e133}16"
+        );
+        // A styled MTEXT run keeps its UTF-16 range across the mapping.
+        let parsed = parse_mtext("{\\H2x;%%132}20", 1.0);
+        assert_eq!(parsed.value, "\u{e132}20");
+        assert_eq!((parsed.runs[0].start, parsed.runs[0].end), (0, 1));
     }
 
     #[test]

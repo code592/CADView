@@ -35,7 +35,10 @@ has no advertising SDK and requests no network permission.
   rotated text uses shaped layout for viewport culling; Unicode surrogate
   pairs are decoded without dropping supplementary characters. Missing
   proprietary CAD fonts use readable fallbacks, whose metrics and outlines
-  may differ from the original font.
+  may differ from the original font. Texts whose style uses SHX fonts keep
+  their CAD proportions: big-font CJK fills the text height and the narrow
+  `ebgen.shx` Latin uses a bundled condensed substitute; structural rebar
+  codes `%%130`–`%%133` show their grade symbols.
 - Black/near-black neutral 2D ink is adapted for visibility on the dark canvas;
   original entity colors, opacity and geometry remain unchanged in the scene.
 - 2D pan, zoom, layers, selection, snapping, coordinates, distance with X/Y

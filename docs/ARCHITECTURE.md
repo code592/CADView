@@ -157,7 +157,7 @@ source ranges, rather than repartitioning a second natural-height block.
 The last column retains excess content instead of silently discarding labels.
 Column paragraphs are owned by their block and the LRU additionally bounds the
 number of retained paragraphs. DWG embedded height/total extents survive the
-vendored reader/domain/writer; parser version `cadview-14` and scene cache 28
+vendored reader/domain/writer; parser version `cadview-15` and scene cache 29
 invalidate previously flattened cached scenes. Original-CAD visual parity,
 vertical text flow and legacy linked-column XDATA remain unverified/incomplete.
 

@@ -504,3 +504,20 @@ first text line below the stored top-left text location, confirming that
 placement; its leader line, arrowhead and dogleg were previously not drawn.
 Scene cache 28 / `cadview-14` invalidate older cached scenes.
 
+## SHX substitute proportions and rebar symbols
+
+SHX fonts are not redistributable. In the local A1/A2/A3 title-block DWG
+(style `ebgen.shx` + `hztxt.shx`, height 3.2, width factor 0.8) leader labels
+sit on underlines that AutoCAD fitted to the text. Comparing those widths with
+our layout showed CJK 46% and Latin 32% too wide: the CJK em had been derived
+from the Latin capital height, while a big font draws CJK in a cell whose
+height is the text height. Texts now carry their style's SHX files; big-font
+CJK uses the text height as its em and `ebgen.shx` uses a generated narrow Noto
+Sans (scale 0.758, `scripts/generate_cad_fonts.py`). Fitted labels moved from
+1.15–1.40x to 0.98–1.09x of AutoCAD's widths; `test/cad_shx_text_test.dart`
+pins four of them within ±7%. Other SHX Latin fonts keep the regular fallback
+because their proportions have not been measured. Codes 130–133 (`%%130`–
+`%%133`, tssdeng-compatible structural fonts) render bundled HPB300, HRB335,
+HRB400 and RRB400 symbols instead of missing-glyph boxes. Scene cache 29 /
+`cadview-15` invalidate older cached scenes.
+

@@ -1302,6 +1302,7 @@ fn normalize_entity_in_frame(
                 mirrored_x: value.generation_flags & 2 != 0,
                 mirrored_y: value.generation_flags & 4 != 0,
                 font_family: text_font_family(drawing, &value.style),
+                shx: text_shx_fonts(drawing, &value.style),
                 plane: plane(transformed_axes(axes, text_frame)),
                 text_runs: parsed.runs,
                 text_warnings: parsed.warnings,
@@ -1430,6 +1431,7 @@ fn normalize_entity_in_frame(
                 mirrored_x: style_mirrored_x(drawing, &value.style),
                 mirrored_y: style_mirrored_y(drawing, &value.style),
                 font_family: text_font_family(drawing, &value.style),
+                shx: text_shx_fonts(drawing, &value.style),
                 plane: if default_plane {
                     None
                 } else {
@@ -1486,6 +1488,14 @@ fn style_mirrored_x(drawing: &CadDocument, style_name: &str) -> bool {
 
 fn style_mirrored_y(drawing: &CadDocument, style_name: &str) -> bool {
     text_style(drawing, style_name).is_some_and(|style| style.flags.upside_down)
+}
+
+fn text_shx_fonts(drawing: &CadDocument, style_name: &str) -> Option<cad_core::ShxFonts2D> {
+    let style = text_style(drawing, style_name)?;
+    if !style.true_type_font.trim().is_empty() {
+        return None;
+    }
+    cad_core::ShxFonts2D::from_style(&style.font_file, &style.big_font_file)
 }
 
 fn text_font_family(drawing: &CadDocument, style_name: &str) -> Option<String> {
