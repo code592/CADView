@@ -28,8 +28,8 @@ static VIEWPORTS: Lazy<RwLock<HashMap<u64, NativeViewportState>>> =
 
 const INITIAL_2D_ENTITY_LIMIT: usize = 250_000;
 // Version 12 includes validated per-mesh volume centroid coordinates.
-const SCENE_CACHE_VERSION: u32 = 29;
-const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-15";
+const SCENE_CACHE_VERSION: u32 = 30;
+const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-16";
 
 struct DocumentSession {
     document: OpenedDocument,
@@ -248,9 +248,12 @@ fn open_document_internal(
     let source_path = Path::new(&path);
     let document = load_cached_document(source_path).unwrap_or_else(|| {
         let registry = cad_formats::default_registry();
-        let document = registry
+        let mut document = registry
             .open_path(source_path, cancel, sink)
             .map_err(|error| error.to_string())?;
+        if let SceneDocument::TwoD(scene) = &document.scene {
+            document.metadata.frames = cad_core::detect_drawing_frames(scene);
+        }
         cancel.check().map_err(|error| error.to_string())?;
         if !APPLICATION_BACKGROUNDED.load(Ordering::Acquire) {
             write_cached_document(source_path, &document);
@@ -2051,6 +2054,7 @@ mod tests {
                 byte_length: 0,
                 units: None,
                 author: None,
+                frames: Vec::new(),
             },
             scene: SceneDocument::TwoD(scene.clone()),
             diagnostics: Vec::new(),
@@ -2101,6 +2105,7 @@ mod tests {
                 byte_length: 0,
                 units: None,
                 author: None,
+                frames: Vec::new(),
             },
             scene: SceneDocument::TwoD(Scene2D {
                 layers: vec![
@@ -2216,6 +2221,7 @@ mod tests {
                 byte_length: 0,
                 units: None,
                 author: None,
+                frames: Vec::new(),
             },
             scene: SceneDocument::TwoD(scene),
             diagnostics: Vec::new(),
@@ -2330,6 +2336,7 @@ mod tests {
                 byte_length: 0,
                 units: None,
                 author: None,
+                frames: Vec::new(),
             },
             scene: SceneDocument::TwoD(scene.clone()),
             diagnostics: Vec::new(),
@@ -2453,6 +2460,7 @@ mod tests {
                 byte_length: std::fs::metadata(&source_path).unwrap().len(),
                 units: None,
                 author: None,
+                frames: Vec::new(),
             },
             scene: SceneDocument::TwoD(Scene2D::default()),
             diagnostics: Vec::new(),

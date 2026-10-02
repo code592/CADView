@@ -498,6 +498,7 @@ fn finish_mesh_document(
             byte_length: bytes.len() as u64,
             units: units.map(str::to_owned),
             author: None,
+            frames: Vec::new(),
         },
         scene: SceneDocument::ThreeD(scene),
         diagnostics,

@@ -152,6 +152,7 @@ fn metadata(format: FormatId, display_name: &str, bytes: &[u8]) -> DocumentMetad
         byte_length: bytes.len() as u64,
         units: None,
         author: None,
+        frames: Vec::new(),
     }
 }
 

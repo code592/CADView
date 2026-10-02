@@ -7,8 +7,8 @@ use crate::ocs_curves::{
 };
 use crate::text_coordinates::{mtext_axes, ocs_axes, plane, world_point};
 use crate::text_normalization::{
-    append_text_diagnostics, mtext_background, mtext_columns, mtext_line_spacing, parse_mtext,
-    parse_single_line_text, SourceMTextColumns,
+    append_text_diagnostics, apply_shx_symbol_maps, mtext_background, mtext_columns,
+    mtext_line_spacing, parse_mtext, parse_single_line_text, SourceMTextColumns,
 };
 use crate::units::autocad_unit_id;
 use cad_core::{
@@ -166,6 +166,7 @@ impl FormatAdapter for DxfAdapter {
             entities,
             bounds: None,
         };
+        apply_shx_symbol_maps(&mut scene.entities);
         scene.recompute_bounds();
         let mut diagnostics = Vec::new();
         append_text_diagnostics(&scene, &mut diagnostics);
@@ -200,6 +201,7 @@ impl FormatAdapter for DxfAdapter {
                 units: autocad_unit_id(drawing.header.default_drawing_units as i16)
                     .map(str::to_owned),
                 author: None,
+                frames: Vec::new(),
             },
             scene: SceneDocument::TwoD(scene),
             diagnostics,
@@ -4390,7 +4392,7 @@ mod tests {
             "40",
             "3.2",
             "1",
-            "2%%13316",
+            "2%%13316(^ 10)3*3",
             "7",
             "说明",
             "100",
@@ -4436,7 +4438,7 @@ mod tests {
         let Entity2DGeometry::Text { value, shx, .. } = &scene.entities[0].geometry else {
             panic!()
         };
-        assert_eq!(value, "2\u{e133}16");
+        assert_eq!(value, "2\u{e133}16(\u{e130}10)3×3");
         assert_eq!(
             shx.as_ref(),
             Some(&cad_core::ShxFonts2D {

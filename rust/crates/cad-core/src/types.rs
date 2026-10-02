@@ -144,6 +144,9 @@ pub struct DocumentMetadata {
     pub byte_length: u64,
     pub units: Option<String>,
     pub author: Option<String>,
+    /// Sheet borders of a 2D drawing, used to split image/PDF exports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<crate::DrawingFrame>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

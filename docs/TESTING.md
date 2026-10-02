@@ -517,7 +517,24 @@ Sans (scale 0.758, `scripts/generate_cad_fonts.py`). Fitted labels moved from
 1.15–1.40x to 0.98–1.09x of AutoCAD's widths; `test/cad_shx_text_test.dart`
 pins four of them within ±7%. Other SHX Latin fonts keep the regular fallback
 because their proportions have not been measured. Codes 130–133 (`%%130`–
-`%%133`, tssdeng-compatible structural fonts) render bundled HPB300, HRB335,
-HRB400 and RRB400 symbols instead of missing-glyph boxes. Scene cache 29 /
-`cadview-15` invalidate older cached scenes.
+`%%133`) render bundled rebar symbols instead of missing-glyph boxes, and
+ebgen.shx `^`/`*` render as HPB300 and ×. The glyphs and maps follow the
+user-supplied AutoCAD plot of this drawing (`钢筋⏀20(Φ10)`, `Φ10@10`,
+`2⏀16`, `1.2x1.2`); %%130–%%132 use the corresponding standard symbols.
+
+## Sheet export
+
+`cad_core::detect_drawing_frames` finds title-block sheets: closed
+axis-aligned rectangles with ISO A proportions (±6%) that contain an inner
+border at least 80% of their size, outermost only, in reading order, with the
+matching sheet and round drawing scale. For the A1/A2/A3 sample it returns the
+three outer borders, whose sizes equal the pages of the supplied AutoCAD PDF;
+the exported PDF's pages are 2355.6×1655.5, 1655.5×1162.3 and 1162.0×803.2 pt
+against 2356×1655, 1655×1162 and 1162×802. Image export offers the current view
+and each sheet (one PNG per choice); PDF export writes one page per sheet (or
+the current view) as a Deflate-compressed raster in the viewer's colours.
+`test/sheet_export_test.dart` and the widget flow test cover sizing, the PDF
+structure, edge-to-edge rendering, names and the save flow. Rectangles built
+from separate LINE entities and single-border sheets are not detected. Scene
+cache 30 / `cadview-16` invalidate older cached scenes.
 

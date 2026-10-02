@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -151,6 +152,116 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+  testWidgets('drawing sheets export as chosen PNGs and a paged PDF', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 760));
+    final previousPicker = FilePickerPlatform.instance;
+    final picker = _ImageSavePicker()..result = Uri.file('/tmp/sheet');
+    FilePickerPlatform.instance = picker;
+    addTearDown(() {
+      FilePickerPlatform.instance = previousPicker;
+      tester.binding.setSurfaceSize(null);
+    });
+    final base = multilingualCadDocument();
+    final document = CadDocumentModel(
+      format: base.format,
+      displayName: 'A1、A2、A3图框.dwg',
+      sceneKind: base.sceneKind,
+      scene: base.scene,
+      diagnostics: base.diagnostics,
+      frames: const [
+        CadDrawingFrame(
+          bounds: Rect.fromLTWH(0, 0, 450, 318),
+          paper: 'A1',
+          scale: 1,
+        ),
+        CadDrawingFrame(bounds: Rect.fromLTWH(450, 0, 300, 212), paper: 'A3'),
+      ],
+    );
+    final names = <String>[];
+    final mimes = <String>[];
+    final payloads = <Uint8List>[];
+    final opened = OpenedCadDocument(
+      sessionId: BigInt.one,
+      formatId: 'dwg',
+      sceneKind: 'two_d',
+      displayName: 'A1、A2、A3图框.dwg',
+      fingerprint: 'test',
+      document: document,
+      annotations: const [],
+      sourcePath: '/tmp/A1、A2、A3图框.dwg',
+      totalEntityCount: BigInt.from(document.entities.length),
+      isPartial: false,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        supportedLocales: AppLocalizations.supportedLocales,
+        localizationsDelegates: const [
+          AppLocalizations.delegate,
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        home: CadViewerPage(
+          engine: _FakeCadEngine()..viewportDocument = document,
+          opened: opened,
+          decimalPlaces: 2,
+        ),
+      ),
+    );
+    await tester.tap(find.byIcon(Icons.fullscreen_exit));
+    await tester.pumpAndSettle();
+
+    Future<void> waitForSaves(int count) async {
+      for (var attempt = 0; picker.calls < count && attempt < 200; attempt++) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 10)),
+        );
+        await tester.pump();
+        if (picker.calls > names.length) {
+          names.add(picker.name!);
+          mimes.add(picker.mime!);
+          payloads.add(picker.bytes!);
+        }
+      }
+      await tester.pumpAndSettle();
+    }
+
+    await tester.tap(find.byKey(const ValueKey('viewer_more_actions')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export image (PNG)'));
+    await tester.pumpAndSettle();
+    expect(find.text('Choose sheets to export'), findsOneWidget);
+    expect(find.text('Current view'), findsOneWidget);
+    expect(find.text('Sheet 1 · A1'), findsOneWidget);
+    expect(find.text('Sheet 2 · A3'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('sheet_choice_export')));
+    await tester.pump();
+    await waitForSaves(2);
+    expect(names, ['A1、A2、A3图框-1-A1.png', 'A1、A2、A3图框-2-A3.png']);
+    expect(mimes, everyElement('image/png'));
+    for (final bytes in payloads) {
+      expect(bytes.take(4).toList(), [137, 80, 78, 71]);
+    }
+    expect(find.text('2 images exported'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('viewer_more_actions')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Export PDF'));
+    await tester.pump();
+    await waitForSaves(3);
+    expect(names.last, 'A1、A2、A3图框.pdf');
+    expect(mimes.last, 'application/pdf');
+    final pdf = latin1.decode(payloads.last);
+    expect(pdf.startsWith('%PDF-1.4'), isTrue);
+    expect(pdf, contains('/Count 2'));
+    // The A1 sheet prints at 1:1 (450 mm wide); the unscaled one uses A3.
+    expect(pdf, contains('/MediaBox [0 0 1275.591 901.417]'));
+    expect(pdf, contains('/MediaBox [0 0 1190.551'));
+    expect(find.text('PDF exported'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
   testWidgets(
     'all supported locales fit compact home and settings at large text',
     (tester) async {

@@ -198,6 +198,7 @@ impl FormatAdapter for SvgAdapter {
                 byte_length: bytes.len() as u64,
                 units: None,
                 author: None,
+                frames: Vec::new(),
             },
             scene: SceneDocument::TwoD(scene),
             diagnostics,

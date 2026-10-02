@@ -22,7 +22,9 @@ has no advertising SDK and requests no network permission.
   reported by name.
 - Fully offline PDF page rendering, pan and zoom.
 - Export the current 2D/3D viewport or loaded PDF page as a PNG, without
-  toolbars or navigation controls. Painted annotations are included.
+  toolbars or navigation controls. Painted annotations are included. Drawings
+  with title-block sheets (for example A1/A2/A3 frames) can export each sheet
+  as its own PNG and as a PDF with one page per sheet at its paper size.
 - DWG R13-R2018+ Beta support with layouts, nested blocks, attributes and a
   validated local reopen cache.
 - Bundled OFL fonts provide offline Latin/Greek/Cyrillic, CJK, Arabic, Hebrew,

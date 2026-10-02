@@ -8,6 +8,7 @@ class CadDocumentModel {
     required this.scene,
     required this.diagnostics,
     this.units,
+    this.frames = const [],
   });
 
   factory CadDocumentModel.fromJson(Map<String, dynamic> json) {
@@ -17,6 +18,7 @@ class CadDocumentModel {
       format: metadata['format'] as String,
       displayName: metadata['display_name'] as String,
       units: metadata['units'] as String?,
+      frames: CadDrawingFrame.listFromJson(metadata['frames']),
       sceneKind: sceneEnvelope['scene_kind'] as String,
       scene: sceneEnvelope['scene'] as Map<String, dynamic>,
       diagnostics: (json['diagnostics'] as List<dynamic>)
@@ -27,6 +29,9 @@ class CadDocumentModel {
   final String format;
   final String displayName;
   final String? units;
+
+  /// Sheet borders detected by the native engine, in reading order.
+  final List<CadDrawingFrame> frames;
   final String sceneKind;
   final Map<String, dynamic> scene;
   final List<Map<String, dynamic>> diagnostics;
@@ -46,6 +51,7 @@ class CadDocumentModel {
       format: format,
       displayName: displayName,
       units: units,
+      frames: frames,
       sceneKind: sceneKind,
       scene: retainedScene,
       diagnostics: diagnostics,
@@ -159,4 +165,47 @@ class CadLayerModel {
   final String name;
   final bool visible;
   final Color color;
+}
+
+/// One drawing sheet: the outer border of a title-block frame.
+class CadDrawingFrame {
+  const CadDrawingFrame({required this.bounds, this.paper, this.scale});
+
+  /// World rectangle (left/top hold the minimum X/Y, as for scene bounds).
+  final Rect bounds;
+
+  /// Matching ISO sheet, such as "A1".
+  final String? paper;
+
+  /// Drawing units per paper millimetre for [paper].
+  final double? scale;
+
+  static List<CadDrawingFrame> listFromJson(Object? value) {
+    if (value is! List) return const [];
+    final frames = <CadDrawingFrame>[];
+    for (final item in value) {
+      if (item is! Map) continue;
+      final bounds = item['bounds'];
+      if (bounds is! Map) continue;
+      final min = bounds['min'];
+      final max = bounds['max'];
+      if (min is! Map || max is! Map) continue;
+      final rect = Rect.fromLTRB(
+        (min['x'] as num).toDouble(),
+        (min['y'] as num).toDouble(),
+        (max['x'] as num).toDouble(),
+        (max['y'] as num).toDouble(),
+      );
+      if (!rect.isFinite || rect.isEmpty) continue;
+      final scale = (item['scale'] as num?)?.toDouble();
+      frames.add(
+        CadDrawingFrame(
+          bounds: rect,
+          paper: item['paper'] as String?,
+          scale: scale != null && scale.isFinite && scale > 0 ? scale : null,
+        ),
+      );
+    }
+    return List.unmodifiable(frames);
+  }
 }

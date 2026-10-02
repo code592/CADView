@@ -126,7 +126,7 @@ void main() {
       // A missing glyph would fall back to a box or nothing; the symbol has
       // a substantial ring-and-stroke outline.
       expect(ink, greaterThan(800), reason: code.toRadixString(16));
-      expect(painter.width, closeTo(code == 0xe133 ? 86 : 64, 1));
+      expect(painter.width, closeTo(60, 1));
       image!.dispose();
       painter.dispose();
     }

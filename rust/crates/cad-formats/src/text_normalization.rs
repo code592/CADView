@@ -196,6 +196,25 @@ fn cad_special_symbol(character: char) -> char {
     }
 }
 
+/// Some SHX fonts draw ASCII characters as engineering symbols. These maps
+/// are limited to fonts confirmed against an AutoCAD plot: ebgen.shx draws
+/// `^` as the HPB300 rebar symbol and `*` as a multiplication sign.
+pub(crate) fn apply_shx_symbol_maps(entities: &mut [cad_core::Entity2D]) {
+    for entity in entities {
+        if let cad_core::Entity2DGeometry::Text {
+            value,
+            shx: Some(shx),
+            ..
+        } = &mut entity.geometry
+        {
+            if shx.font.as_deref() == Some("ebgen.shx") && value.contains(['^', '*']) {
+                // All are one UTF-16 unit, so style-run offsets stay valid.
+                *value = value.replace('^', "\u{e130}").replace('*', "×");
+            }
+        }
+    }
+}
+
 pub(crate) fn parse_mtext(value: &str, base_height: f64) -> ParsedCadText {
     parse_text(value, true, base_height)
 }

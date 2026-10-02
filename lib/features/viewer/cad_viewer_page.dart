@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ import '../../core/cad_engine.dart';
 import '../../core/distribution.dart';
 import '../../core/document_details.dart';
 import '../../core/image_export.dart';
+import '../../core/sheet_export.dart';
 import '../../l10n/app_localizations.dart';
 import 'cad_document_model.dart';
 import 'cad_entity_metrics.dart';
@@ -54,6 +56,7 @@ enum _ViewerMenuAction {
   annotations,
   exportAnnotations,
   exportImage,
+  exportPdf,
   layers,
   overview,
 }
@@ -177,6 +180,15 @@ class _CadViewerPageState extends State<CadViewerPage> {
   bool _pdfExportReady = false;
   bool get _canExportImage =>
       !_exportingImage && (widget.opened.formatId != 'pdf' || _pdfExportReady);
+
+  /// PDF documents are already pages; every other scene can be exported.
+  bool get _canExportPdf => _canExportImage && widget.opened.formatId != 'pdf';
+
+  /// Detected drawing sheets that image/PDF export splits on.
+  List<CadDrawingFrame> get _sheetFrames =>
+      _document.sceneKind == 'two_d' && widget.opened.formatId != 'pdf'
+      ? _document.frames
+      : const [];
   late CadDocumentModel _document = widget.opened.document;
   ViewerTool _tool = ViewerTool.pan;
   double _zoom = 1;
@@ -5271,6 +5283,8 @@ class _CadViewerPageState extends State<CadViewerPage> {
 
   Future<void> _exportImage() async {
     if (!_canExportImage) return;
+    final frames = _sheetFrames;
+    if (frames.isNotEmpty) return _exportSheetImages(frames);
     final l10n = context.l10n;
     final pixelRatio = MediaQuery.devicePixelRatioOf(context);
     setState(() => _exportingImage = true);
@@ -5294,6 +5308,181 @@ class _CadViewerPageState extends State<CadViewerPage> {
         ScaffoldMessenger.of(context)
           ..hideCurrentSnackBar()
           ..showSnackBar(SnackBar(content: Text(l10n.text('imageExported'))));
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(l10n.text('exportFailed', {'error': error})),
+            ),
+          );
+      }
+    } finally {
+      if (mounted) setState(() => _exportingImage = false);
+    }
+  }
+
+  /// Renders one detected sheet from a batch loaded for exactly its border.
+  Future<ui.Image> _renderSheet(CadDrawingFrame frame) async {
+    final batch = await widget.engine.loadViewport(
+      widget.opened.sessionId,
+      frame.bounds,
+    );
+    return renderSheetImage(batch, frame.bounds, annotations: _annotations);
+  }
+
+  /// Captures the visible viewport as an image (the existing PNG path).
+  Future<ui.Image> _captureCurrentView(double pixelRatio) async {
+    await _refreshViewport(propagateFailure: true);
+    final png = await captureViewportPng(
+      _imageCaptureKey,
+      devicePixelRatio: pixelRatio,
+    );
+    final codec = await ui.instantiateImageCodec(png);
+    try {
+      return (await codec.getNextFrame()).image;
+    } finally {
+      codec.dispose();
+    }
+  }
+
+  Future<void> _exportSheetImages(List<CadDrawingFrame> frames) async {
+    final l10n = context.l10n;
+    final pixelRatio = MediaQuery.devicePixelRatioOf(context);
+    final selection = await showDialog<List<int>>(
+      context: context,
+      builder: (context) => _SheetChoiceDialog(frames: frames),
+    );
+    if (selection == null || selection.isEmpty || !mounted) return;
+    setState(() => _exportingImage = true);
+    var saved = 0;
+    try {
+      for (final index in selection) {
+        late final Uint8List bytes;
+        late final String fileName;
+        if (index < 0) {
+          await _refreshViewport(propagateFailure: true);
+          if (!mounted) return;
+          bytes = await captureViewportPng(
+            _imageCaptureKey,
+            devicePixelRatio: pixelRatio,
+          );
+          fileName = imageExportFileName(widget.opened.displayName);
+        } else {
+          final frame = frames[index];
+          final image = await _renderSheet(frame);
+          try {
+            bytes = await encodePng(image);
+          } finally {
+            image.dispose();
+          }
+          fileName = sheetExportFileName(
+            widget.opened.displayName,
+            index + 1,
+            frame.paper,
+            'png',
+          );
+        }
+        if (!mounted) return;
+        final uri = await FilePicker.saveFile(
+          dialogTitle: l10n.text('exportImage'),
+          fileName: fileName,
+          bytes: bytes,
+          mimeType: 'image/png',
+        );
+        // Cancelling one save dialog stops the remaining sheets.
+        if (uri == null) break;
+        saved++;
+      }
+      if (saved > 0 && mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                saved == 1
+                    ? l10n.text('imageExported')
+                    : l10n.text('imagesExported', {'count': saved}),
+              ),
+            ),
+          );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(l10n.text('exportFailed', {'error': error})),
+            ),
+          );
+      }
+    } finally {
+      if (mounted) setState(() => _exportingImage = false);
+    }
+  }
+
+  /// One page per detected sheet (sized to its paper), or the current view.
+  Future<void> _exportPdf() async {
+    if (!_canExportPdf) return;
+    final l10n = context.l10n;
+    final pixelRatio = MediaQuery.devicePixelRatioOf(context);
+    setState(() => _exportingImage = true);
+    try {
+      final pages = <PdfRasterPage>[];
+      final frames = _sheetFrames;
+      if (frames.isEmpty) {
+        final image = await _captureCurrentView(pixelRatio);
+        try {
+          final size = sheetPageSizePoints(
+            Rect.fromLTWH(
+              0,
+              0,
+              image.width.toDouble(),
+              image.height.toDouble(),
+            ),
+          );
+          pages.add(
+            await PdfRasterPage.fromImage(
+              image,
+              widthPoints: size.width,
+              heightPoints: size.height,
+            ),
+          );
+        } finally {
+          image.dispose();
+        }
+      } else {
+        for (final frame in frames) {
+          final image = await _renderSheet(frame);
+          try {
+            final size = sheetPageSizePoints(frame.bounds, scale: frame.scale);
+            pages.add(
+              await PdfRasterPage.fromImage(
+                image,
+                widthPoints: size.width,
+                heightPoints: size.height,
+              ),
+            );
+          } finally {
+            image.dispose();
+          }
+          if (!mounted) return;
+        }
+      }
+      if (!mounted) return;
+      final uri = await FilePicker.saveFile(
+        dialogTitle: l10n.text('exportPdf'),
+        fileName: documentExportFileName(widget.opened.displayName, 'pdf'),
+        bytes: buildRasterPdf(pages),
+        mimeType: 'application/pdf',
+      );
+      if (uri != null && mounted) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text(l10n.text('pdfExported'))));
       }
     } catch (error) {
       if (mounted) {
@@ -5978,6 +6167,16 @@ class _CadViewerPageState extends State<CadViewerPage> {
                           title: Text(l10n.text('exportImage')),
                         ),
                       ),
+                      if (widget.opened.formatId != 'pdf')
+                        PopupMenuItem(
+                          value: _ViewerMenuAction.exportPdf,
+                          enabled: _canExportPdf,
+                          child: ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            leading: const Icon(Icons.picture_as_pdf_outlined),
+                            title: Text(l10n.text('exportPdf')),
+                          ),
+                        ),
                       if (annotationsAvailable)
                         PopupMenuItem(
                           value: _ViewerMenuAction.annotations,
@@ -6025,6 +6224,12 @@ class _CadViewerPageState extends State<CadViewerPage> {
                           )
                         : const Icon(Icons.image_outlined),
                   ),
+                  if (widget.opened.formatId != 'pdf')
+                    IconButton(
+                      tooltip: l10n.text('exportPdf'),
+                      onPressed: _canExportPdf ? _exportPdf : null,
+                      icon: const Icon(Icons.picture_as_pdf_outlined),
+                    ),
                   IconButton(
                     tooltip: l10n.text('layersAssembly'),
                     onPressed: _showLayers,
@@ -6954,6 +7159,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
         return;
       case _ViewerMenuAction.exportImage:
         unawaited(_exportImage());
+        return;
+      case _ViewerMenuAction.exportPdf:
+        unawaited(_exportPdf());
         return;
       case _ViewerMenuAction.layers:
         _showLayers();
@@ -9209,6 +9417,75 @@ class _AnnotationEditorDialogState extends State<_AnnotationEditorDialog> {
         FilledButton(
           onPressed: () => Navigator.pop(context, _controller.text.trim()),
           child: Text(l10n.text('save')),
+        ),
+      ],
+    );
+  }
+}
+
+/// Multi-select list of what to export as images: the current view and each
+/// detected drawing sheet. Returns the chosen indexes (-1 is the current view).
+class _SheetChoiceDialog extends StatefulWidget {
+  const _SheetChoiceDialog({required this.frames});
+
+  final List<CadDrawingFrame> frames;
+
+  @override
+  State<_SheetChoiceDialog> createState() => _SheetChoiceDialogState();
+}
+
+class _SheetChoiceDialogState extends State<_SheetChoiceDialog> {
+  late final Set<int> _selected = {
+    for (var i = 0; i < widget.frames.length; i++) i,
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    Widget option(int index, String title) => CheckboxListTile(
+      key: ValueKey('sheet_choice_$index'),
+      value: _selected.contains(index),
+      title: Text(title),
+      controlAffinity: ListTileControlAffinity.leading,
+      onChanged: (checked) => setState(() {
+        if (checked == true) {
+          _selected.add(index);
+        } else {
+          _selected.remove(index);
+        }
+      }),
+    );
+    return AlertDialog(
+      title: Text(l10n.text('exportChooseSheets')),
+      contentPadding: const EdgeInsets.symmetric(vertical: 8),
+      content: SizedBox(
+        width: 360,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            option(-1, l10n.text('exportCurrentView')),
+            for (var i = 0; i < widget.frames.length; i++)
+              option(
+                i,
+                [
+                  l10n.text('exportSheet', {'index': i + 1}),
+                  ?widget.frames[i].paper,
+                ].join(' · '),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(l10n.text('cancel')),
+        ),
+        FilledButton(
+          key: const ValueKey('sheet_choice_export'),
+          onPressed: _selected.isEmpty
+              ? null
+              : () => Navigator.of(context).pop(_selected.toList()..sort()),
+          child: Text(l10n.text('exportAction')),
         ),
       ],
     );

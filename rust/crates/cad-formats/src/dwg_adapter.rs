@@ -4,8 +4,8 @@ use crate::mleader;
 use crate::ocs_curves::{self, ocs_entity_circle_or_arc};
 use crate::text_coordinates::{mtext_axes, ocs_axes, plane, Axes3};
 use crate::text_normalization::{
-    append_text_diagnostics, mtext_background, mtext_columns, mtext_line_spacing, parse_mtext,
-    parse_single_line_text, SourceMTextColumns,
+    append_text_diagnostics, apply_shx_symbol_maps, mtext_background, mtext_columns,
+    mtext_line_spacing, parse_mtext, parse_single_line_text, SourceMTextColumns,
 };
 use crate::units::autocad_unit_id;
 use acadrust::{
@@ -218,7 +218,8 @@ fn build_document(
         }
         normalizer.append(source, 0, &mut block_stack)?;
     }
-    let entities = normalizer.entities;
+    let mut entities = normalizer.entities;
+    apply_shx_symbol_maps(&mut entities);
     let unsupported = normalizer.unsupported;
     let unsupported_kinds = normalizer.unsupported_kinds;
 
@@ -292,6 +293,7 @@ fn build_document(
             byte_length,
             units,
             author: None,
+            frames: Vec::new(),
         },
         scene: SceneDocument::TwoD(scene),
         diagnostics,
