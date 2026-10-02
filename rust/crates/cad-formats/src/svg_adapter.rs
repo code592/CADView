@@ -164,6 +164,7 @@ impl FormatAdapter for SvgAdapter {
                     color_argb: 0xffe5e7eb,
                     stroke_width: 0.0,
                     filled: false,
+                    dash: Vec::new(),
                     geometry,
                 });
             }

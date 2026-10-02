@@ -1,5 +1,6 @@
 use crate::affine2d::{transform_geometry, Affine2};
 use crate::curves;
+use crate::linetypes;
 use crate::mleader;
 use crate::ocs_curves::{self, ocs_entity_circle_or_arc};
 use crate::text_coordinates::{mtext_axes, ocs_axes, plane, Axes3};
@@ -979,8 +980,47 @@ impl DwgNormalizer<'_> {
                 0.0
             },
             filled,
+            dash: if filled
+                || matches!(
+                    geometry,
+                    Entity2DGeometry::Text { .. } | Entity2DGeometry::Point { .. }
+                ) {
+                Vec::new()
+            } else {
+                self.dash_pattern(common)
+            },
             geometry,
         });
+    }
+
+    /// Linetype pattern of an entity: its own linetype, or its layer's for
+    /// ByLayer. Block children already carry the INSERT's linetype for
+    /// ByBlock (acadrust resolves it during explosion); a top-level ByBlock
+    /// entity is continuous.
+    fn dash_pattern(&self, common: &EntityCommon) -> Vec<f64> {
+        let mut name = common.linetype.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("ByLayer") {
+            name = self
+                .drawing
+                .layers
+                .get(&common.layer)
+                .map_or("", |layer| layer.line_type.as_str());
+        }
+        if name.eq_ignore_ascii_case("ByBlock") || linetypes::is_continuous(name) {
+            return Vec::new();
+        }
+        let Some(linetype) = self.drawing.line_types.get(name) else {
+            return Vec::new();
+        };
+        let elements = linetype
+            .elements
+            .iter()
+            .map(|element| element.length)
+            .collect::<Vec<_>>();
+        linetypes::scaled_pattern(
+            &elements,
+            self.drawing.header.linetype_scale * common.linetype_scale,
+        )
     }
 
     fn mark_unsupported(&mut self, kind: &'static str) {

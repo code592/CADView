@@ -61,12 +61,59 @@ class _CadWorldPathBatch {
     required this.strokeWidth,
     required this.filled,
     required this.path,
+    this.dashedPath,
+    this.dashPeriod = 0,
   });
 
   final int colorArgb;
   final double strokeWidth;
   final bool filled;
+
+  /// Continuous geometry; also drawn for linetypes too dense to resolve.
   final Path path;
+
+  /// The same geometry broken into linetype dashes (world units).
+  final Path? dashedPath;
+  final double dashPeriod;
+}
+
+/// Linetype periods below this many screen pixels draw continuous, as CAD
+/// viewers do when a pattern is too small to see.
+const double _cadMinimumDashPeriodPixels = 3;
+
+/// Breaks [source] into [pattern] (positive dash, negative gap, zero dot) in
+/// the path's own units. Each contour starts with the pattern; contours that
+/// would need more than 20,000 dashes stay continuous.
+Path cadDashPath(Path source, List<double> pattern) {
+  final period = pattern.fold<double>(0, (sum, value) => sum + value.abs());
+  final output = Path();
+  if (!(period > 0) || !pattern.any((value) => value < 0)) {
+    output.addPath(source, Offset.zero);
+    return output;
+  }
+  for (final metric in source.computeMetrics()) {
+    final length = metric.length;
+    if (length / period > 20000) {
+      output.addPath(metric.extractPath(0, length), Offset.zero);
+      continue;
+    }
+    var distance = 0.0;
+    var index = 0;
+    while (distance < length) {
+      final element = pattern[index % pattern.length];
+      index++;
+      if (element >= 0) {
+        // A zero-length dot keeps a tiny extent so the round cap draws it.
+        final end = distance + (element == 0 ? period * 1e-3 : element);
+        output.addPath(
+          metric.extractPath(distance, math.min(end, length)),
+          Offset.zero,
+        );
+      }
+      distance += element.abs();
+    }
+  }
+  return output;
 }
 
 class _CadWorldPathSet {
@@ -904,9 +951,13 @@ class CadScenePainter extends CustomPainter {
     this.coordinateOrigin2D,
     this.coordinateXAxis2D,
     this.coordinateOrigin3D,
+    this.showGrid = true,
   });
 
   final CadDocumentModel document;
+
+  /// The faint screen grid; sheet exports leave it out like a plot.
+  final bool showGrid;
   final double zoom;
   final Offset pan;
   final List<CadTextAnnotation> annotations;
@@ -967,7 +1018,7 @@ class CadScenePainter extends CustomPainter {
       Offset.zero & size,
       Paint()..color = const Color(0xff071017),
     );
-    _paintGrid(canvas, size);
+    if (showGrid) _paintGrid(canvas, size);
     switch (document.sceneKind) {
       case 'two_d':
         _paint2D(canvas, size);
@@ -1013,8 +1064,11 @@ class CadScenePainter extends CustomPainter {
         final worldStrokeWidth = batch.strokeWidth > 0
             ? batch.strokeWidth
             : 1.15 * inverseScale;
+        final dashed =
+            batch.dashedPath != null &&
+            batch.dashPeriod * transform.scale >= _cadMinimumDashPeriodPixels;
         canvas.drawPath(
-          batch.path,
+          dashed ? batch.dashedPath! : batch.path,
           Paint()
             ..color = cadCanvasColor(batch.colorArgb)
             ..style = batch.filled ? PaintingStyle.fill : PaintingStyle.stroke
@@ -1567,7 +1621,9 @@ class CadScenePainter extends CustomPainter {
     List<Map<String, dynamic>> entities,
   ) {
     final origin = source.bounds2D?.center ?? Offset.zero;
-    final paths = <(int, double, bool), Path>{};
+    final paths = <(int, double, bool, String), Path>{};
+    final dashedPaths = <(int, double, bool, String), Path>{};
+    final dashPeriods = <(int, double, bool, String), double>{};
     Offset localPoint(dynamic value) => _point(value) - origin;
 
     for (final entity in entities) {
@@ -1578,11 +1634,15 @@ class CadScenePainter extends CustomPainter {
       final strokeWidth =
           (entity['stroke_width'] as num?)?.toDouble().abs() ?? 0.0;
       final filled = entity['filled'] as bool? ?? false;
-      final path = paths.putIfAbsent((
-        colorArgb,
-        strokeWidth,
-        filled,
-      ), Path.new);
+      final pattern = filled
+          ? const <double>[]
+          : ((entity['dash'] as List<dynamic>?) ?? const [])
+                .map((value) => (value as num).toDouble())
+                .toList(growable: false);
+      final key = (colorArgb, strokeWidth, filled, pattern.join(','));
+      final batchPath = paths.putIfAbsent(key, Path.new);
+      // Dashed entities are shaped on their own so each starts its pattern.
+      final path = pattern.isEmpty ? batchPath : Path();
       switch (geometry['kind']) {
         case 'line':
           final start = localPoint(geometry['start']);
@@ -1621,6 +1681,16 @@ class CadScenePainter extends CustomPainter {
             sweep,
           );
       }
+      if (pattern.isNotEmpty) {
+        batchPath.addPath(path, Offset.zero);
+        dashedPaths
+            .putIfAbsent(key, Path.new)
+            .addPath(cadDashPath(path, pattern), Offset.zero);
+        dashPeriods[key] = pattern.fold<double>(
+          0,
+          (sum, value) => sum + value.abs(),
+        );
+      }
     }
     return _CadWorldPathSet(
       origin: origin,
@@ -1631,6 +1701,8 @@ class CadScenePainter extends CustomPainter {
               strokeWidth: entry.key.$2,
               filled: entry.key.$3,
               path: entry.value,
+              dashedPath: dashedPaths[entry.key],
+              dashPeriod: dashPeriods[entry.key] ?? 0,
             ),
           )
           .toList(growable: false),
@@ -2056,6 +2128,7 @@ class CadScenePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CadScenePainter oldDelegate) =>
       oldDelegate.document != document ||
+      oldDelegate.showGrid != showGrid ||
       oldDelegate.zoom != zoom ||
       oldDelegate.pan != pan ||
       !listEquals(oldDelegate.annotations, annotations) ||

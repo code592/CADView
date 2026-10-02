@@ -5324,13 +5324,24 @@ class _CadViewerPageState extends State<CadViewerPage> {
     }
   }
 
-  /// Renders one detected sheet from a batch loaded for exactly its border.
-  Future<ui.Image> _renderSheet(CadDrawingFrame frame) async {
+  /// Loads exactly one detected sheet and prepares it at [dpi] on its paper.
+  Future<CadSheetRaster> _prepareSheet(
+    CadDrawingFrame frame,
+    double dpi,
+  ) async {
     final batch = await widget.engine.loadViewport(
       widget.opened.sessionId,
       frame.bounds,
     );
-    return renderSheetImage(batch, frame.bounds, annotations: _annotations);
+    final paper = sheetPaperSizeMillimetres(frame.bounds, scale: frame.scale);
+    return CadSheetRaster.prepare(
+      batch,
+      frame.bounds,
+      paperWidthMm: paper.width,
+      paperHeightMm: paper.height,
+      dpi: dpi,
+      annotations: _annotations,
+    );
   }
 
   /// Captures the visible viewport as an image (the existing PNG path).
@@ -5372,12 +5383,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
           fileName = imageExportFileName(widget.opened.displayName);
         } else {
           final frame = frames[index];
-          final image = await _renderSheet(frame);
-          try {
-            bytes = await encodePng(image);
-          } finally {
-            image.dispose();
-          }
+          bytes = await encodeSheetPng(await _prepareSheet(frame, sheetPngDpi));
           fileName = sheetExportFileName(
             widget.opened.displayName,
             index + 1,
@@ -5456,19 +5462,14 @@ class _CadViewerPageState extends State<CadViewerPage> {
         }
       } else {
         for (final frame in frames) {
-          final image = await _renderSheet(frame);
-          try {
-            final size = sheetPageSizePoints(frame.bounds, scale: frame.scale);
-            pages.add(
-              await PdfRasterPage.fromImage(
-                image,
-                widthPoints: size.width,
-                heightPoints: size.height,
-              ),
-            );
-          } finally {
-            image.dispose();
-          }
+          final size = sheetPageSizePoints(frame.bounds, scale: frame.scale);
+          pages.add(
+            await PdfRasterPage.fromSheet(
+              await _prepareSheet(frame, sheetPdfDpi),
+              widthPoints: size.width,
+              heightPoints: size.height,
+            ),
+          );
           if (!mounted) return;
         }
       }

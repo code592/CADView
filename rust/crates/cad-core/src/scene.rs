@@ -284,6 +284,11 @@ pub struct Entity2D {
     /// DWG SOLID dimension arrowhead) rather than an outline-only polyline.
     #[serde(default)]
     pub filled: bool,
+    /// Linetype pattern in drawing units (already multiplied by the drawing
+    /// and entity linetype scales): positive dashes, negative gaps, zero dots.
+    /// Empty is a continuous line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dash: Vec<f64>,
     pub geometry: Entity2DGeometry,
 }
 
@@ -597,6 +602,7 @@ mod text_bounds_tests {
             color_argb: 0xffffffff,
             stroke_width: 0.0,
             filled: false,
+            dash: Vec::new(),
             geometry: Entity2DGeometry::Text {
                 origin: Point2::new(105.0, 0.0),
                 value: "中文\nالعربية\n⌀ 120".into(),

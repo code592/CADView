@@ -3,6 +3,7 @@ mod curves;
 mod dwg_adapter;
 mod dxf_adapter;
 mod dxf_raw;
+mod linetypes;
 mod mesh_adapters;
 mod mleader;
 mod ocs_curves;

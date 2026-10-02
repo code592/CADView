@@ -230,6 +230,7 @@ mod tests {
             color_argb: 0xffffffff,
             stroke_width: 0.0,
             filled: false,
+            dash: Vec::new(),
             geometry: Entity2DGeometry::Polyline {
                 points,
                 closed: !five_points,

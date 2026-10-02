@@ -84,6 +84,7 @@ mod tests {
                     color_argb: 0,
                     stroke_width: 0.0,
                     filled: false,
+                    dash: Vec::new(),
                     geometry: Entity2DGeometry::Line {
                         start: Point2::new(0.0, 0.0),
                         end: Point2::new(10.0, 10.0),
@@ -95,6 +96,7 @@ mod tests {
                     color_argb: 0,
                     stroke_width: 0.0,
                     filled: false,
+                    dash: Vec::new(),
                     geometry: Entity2DGeometry::Point {
                         position: Point2::new(100.0, 100.0),
                     },

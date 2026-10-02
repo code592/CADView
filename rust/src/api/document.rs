@@ -28,8 +28,8 @@ static VIEWPORTS: Lazy<RwLock<HashMap<u64, NativeViewportState>>> =
 
 const INITIAL_2D_ENTITY_LIMIT: usize = 250_000;
 // Version 12 includes validated per-mesh volume centroid coordinates.
-const SCENE_CACHE_VERSION: u32 = 30;
-const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-16";
+const SCENE_CACHE_VERSION: u32 = 31;
+const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-17";
 
 struct DocumentSession {
     document: OpenedDocument,
@@ -2015,6 +2015,7 @@ mod tests {
                     color_argb: 0xffffffff,
                     stroke_width: 0.0,
                     filled: false,
+                    dash: Vec::new(),
                     geometry: Entity2DGeometry::Line {
                         start: Point2::new(1.0, 1.0),
                         end: Point2::new(4.0, 5.0),
@@ -2026,6 +2027,7 @@ mod tests {
                     color_argb: 0xffffffff,
                     stroke_width: 0.0,
                     filled: false,
+                    dash: Vec::new(),
                     geometry: Entity2DGeometry::Line {
                         start: Point2::new(100.0, 100.0),
                         end: Point2::new(100.0, 110.0),
@@ -2037,6 +2039,7 @@ mod tests {
                     color_argb: 0xffffffff,
                     stroke_width: 0.0,
                     filled: false,
+                    dash: Vec::new(),
                     geometry: Entity2DGeometry::Line {
                         start: Point2::new(200.0, 200.0),
                         end: Point2::new(200.0, 220.0),
@@ -2129,6 +2132,7 @@ mod tests {
                         color_argb: 0xffffffff,
                         stroke_width: 0.0,
                         filled: false,
+                        dash: Vec::new(),
                         geometry: Entity2DGeometry::Circle {
                             center: Point2::new(0.0, 0.0),
                             radius: 2.0,
@@ -2140,6 +2144,7 @@ mod tests {
                         color_argb: 0xffffffff,
                         stroke_width: 0.0,
                         filled: false,
+                        dash: Vec::new(),
                         geometry: Entity2DGeometry::Circle {
                             center: Point2::new(10.0, 0.0),
                             radius: 3.0,
@@ -2151,6 +2156,7 @@ mod tests {
                         color_argb: 0xffffffff,
                         stroke_width: 0.0,
                         filled: false,
+                        dash: Vec::new(),
                         geometry: Entity2DGeometry::Polyline {
                             points: vec![
                                 Point2::new(0.0, 0.0),
@@ -2167,6 +2173,7 @@ mod tests {
                         color_argb: 0xffffffff,
                         stroke_width: 0.0,
                         filled: false,
+                        dash: Vec::new(),
                         geometry: Entity2DGeometry::Polyline {
                             points: vec![
                                 Point2::new(0.0, 0.0),
@@ -2308,6 +2315,7 @@ mod tests {
                     color_argb: 0xffffffff,
                     stroke_width: 0.0,
                     filled: false,
+                    dash: Vec::new(),
                     geometry: Entity2DGeometry::Line {
                         start: Point2::new(0.0, 0.0),
                         end: Point2::new(20.0, 20.0),
@@ -2319,6 +2327,7 @@ mod tests {
                     color_argb: 0xffffffff,
                     stroke_width: 0.0,
                     filled: false,
+                    dash: Vec::new(),
                     geometry: Entity2DGeometry::Line {
                         start: Point2::new(0.0, 11.0),
                         end: Point2::new(10.0, 1.0),

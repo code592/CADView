@@ -535,6 +535,25 @@ and each sheet (one PNG per choice); PDF export writes one page per sheet (or
 the current view) as a Deflate-compressed raster in the viewer's colours.
 `test/sheet_export_test.dart` and the widget flow test cover sizing, the PDF
 structure, edge-to-edge rendering, names and the save flow. Rectangles built
-from separate LINE entities and single-border sheets are not detected. Scene
-cache 30 / `cadview-16` invalidate older cached scenes.
+from separate LINE entities and single-border sheets are not detected.
+
+Sheets are rendered in 2048-pixel tiles at their paper size: 300 dpi for PDF
+(one image per tile) and 200 dpi for PNG (rows streamed into IDAT chunks so the
+full raster is never held). Line widths stay at 0.23 mm on paper, so text and
+thin lines remain legible when zoomed; the earlier single 4096-pixel raster was
+about 120 dpi on A1. Tests check tile seams, the decoded streamed PNG and the
+multi-image PDF structure.
+
+## Linetypes
+
+Entities carry their resolved dash pattern (`dash`, world units): the entity
+linetype, the layer's for ByLayer, the INSERT's for ByBlock (also patched into
+acadrust's DWG block resolution), scaled by `$LTSCALE` × entity scale; patterns
+without gaps and `CONTINUOUS` stay solid. The painter dashes each contour from
+its start and draws solid lines when a period is under 3 pixels on screen. In
+the A1/A2/A3 sample the centre lines (`ACAD_ISO04W100`, 12/1.5/0.25/1.5) and
+dashed lines (2.5/1.25) now show as in the AutoCAD plot. Not yet handled:
+block-insert scale on patterns, per-vertex polyline restarts (PLINEGEN off),
+and shapes/text inside complex linetypes. Scene cache 31 / `cadview-17`
+invalidate older cached scenes.
 

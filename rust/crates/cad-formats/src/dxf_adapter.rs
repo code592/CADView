@@ -1,6 +1,7 @@
 use crate::affine2d::{transform_geometry, Affine2};
 use crate::curves;
 use crate::dxf_raw;
+use crate::linetypes;
 use crate::mleader::{self, CmColor, MLeaderModel};
 use crate::ocs_curves::{
     ocs_axes_or_world, ocs_entity_circle_or_arc, ocs_world_point, tessellate_bulged_polyline,
@@ -616,6 +617,8 @@ fn raw_pair_encoding(drawing: &Drawing) -> &'static encoding_rs::Encoding {
 struct Inherited {
     layer: String,
     color: u32,
+    /// Resolved linetype pattern, used by ByBlock children.
+    dash: Vec<f64>,
 }
 
 struct DxfNormalizer<'a> {
@@ -664,15 +667,60 @@ impl DxfNormalizer<'_> {
         (layer, layer_id, layer_color, color_argb)
     }
 
+    /// Linetype pattern of an entity: its own linetype, its (effective)
+    /// layer's for ByLayer, or the enclosing block reference's for ByBlock.
+    fn dash_pattern(
+        &self,
+        name: &str,
+        scale: f64,
+        layer: &str,
+        inherited: Option<&Inherited>,
+    ) -> Vec<f64> {
+        let mut name = name.trim();
+        if name.is_empty() || name.eq_ignore_ascii_case("BYLAYER") {
+            name = self
+                .drawing
+                .layers()
+                .find(|candidate| candidate.name == layer)
+                .map_or("", |layer| layer.line_type_name.as_str());
+        }
+        if name.eq_ignore_ascii_case("BYBLOCK") {
+            return inherited
+                .map(|parent| parent.dash.clone())
+                .unwrap_or_default();
+        }
+        if linetypes::is_continuous(name) {
+            return Vec::new();
+        }
+        let Some(linetype) = self
+            .drawing
+            .line_types()
+            .find(|candidate| candidate.name.eq_ignore_ascii_case(name))
+        else {
+            return Vec::new();
+        };
+        linetypes::scaled_pattern(
+            &linetype.dash_dot_space_lengths,
+            self.drawing.header.line_type_scale * scale,
+        )
+    }
+
     fn push(
         &mut self,
         id: &mut Option<u64>,
         layer_id: u64,
         color_argb: u32,
         filled: bool,
+        dash: &[f64],
         geometry: Entity2DGeometry,
         transform: &Affine2,
     ) -> Result<(), CadError> {
+        let dashed = !filled
+            && !dash.is_empty()
+            && !matches!(
+                geometry,
+                Entity2DGeometry::Text { .. } | Entity2DGeometry::Point { .. }
+            );
         let Some(geometry) = transform_geometry(geometry, transform) else {
             self.mark_unsupported("DEGENERATE_TRANSFORM");
             return Ok(());
@@ -695,6 +743,7 @@ impl DxfNormalizer<'_> {
             color_argb,
             stroke_width: 0.0,
             filled,
+            dash: if dashed { dash.to_vec() } else { Vec::new() },
             geometry,
         });
         Ok(())
@@ -716,9 +765,16 @@ impl DxfNormalizer<'_> {
             .then_some(common.color_24_bit as u32);
         let (layer, layer_id, layer_color, color_argb) =
             self.resolve(&common.layer, &common.color, rgb, inherited);
+        let dash = self.dash_pattern(
+            &common.line_type_name,
+            common.line_type_scale,
+            &layer,
+            inherited,
+        );
         let own = Inherited {
             layer,
             color: color_argb,
+            dash,
         };
         match &entity.specific {
             EntityType::Insert(insert) => {
@@ -752,7 +808,10 @@ impl DxfNormalizer<'_> {
         ) {
             Ok(geometries) => {
                 for (geometry, filled) in geometries {
-                    self.push(&mut id, layer_id, color_argb, filled, geometry, transform)?;
+                    let dash = own.dash.clone();
+                    self.push(
+                        &mut id, layer_id, color_argb, filled, &dash, geometry, transform,
+                    )?;
                 }
             }
             Err(kind) => self.mark_unsupported(kind),
@@ -827,6 +886,7 @@ impl DxfNormalizer<'_> {
                             layer_id,
                             color_argb,
                             false,
+                            &[],
                             geometry,
                             &attribute_transform,
                         )?;
@@ -943,6 +1003,7 @@ impl DxfNormalizer<'_> {
         Some(Inherited {
             layer,
             color: color_argb,
+            dash: Vec::new(),
         })
     }
 
@@ -974,7 +1035,15 @@ impl DxfNormalizer<'_> {
         );
         let (layer_id, line_color) = self.part_color(model.line_color, own);
         for (geometry, filled) in mleader::leader_geometry(model, arrowhead) {
-            self.push(&mut None, layer_id, line_color, filled, geometry, transform)?;
+            self.push(
+                &mut None,
+                layer_id,
+                line_color,
+                filled,
+                &[],
+                geometry,
+                transform,
+            )?;
         }
         if let Some(text) = &model.text {
             let (layer_id, color) = self.part_color(text.color, own);
@@ -986,7 +1055,7 @@ impl DxfNormalizer<'_> {
             if let Some(geometry) =
                 mtext_geometry(&paragraph, self.drawing, layer_color, color, own.color)
             {
-                self.push(&mut None, layer_id, color, false, geometry, transform)?;
+                self.push(&mut None, layer_id, color, false, &[], geometry, transform)?;
             }
         }
         if let Some(block) = &model.block {
@@ -1012,6 +1081,7 @@ impl DxfNormalizer<'_> {
             let content = Inherited {
                 layer: own.layer.clone(),
                 color,
+                dash: Vec::new(),
             };
             self.append_insert(&insert, transform, &content, stack)?;
         }
@@ -1044,6 +1114,7 @@ impl DxfNormalizer<'_> {
                     layer_id,
                     color_argb,
                     fill && *closed,
+                    &[],
                     Entity2DGeometry::Polyline {
                         points: points.clone(),
                         closed: *closed,
@@ -4454,5 +4525,100 @@ mod tests {
             shx.as_ref().and_then(|fonts| fonts.font.as_deref()),
             Some("txt.shx")
         );
+    }
+
+    fn linetype_fixture() -> String {
+        let ltype = |name: &str, elements: &[f64]| {
+            let mut pairs = vec![
+                "0".to_owned(),
+                "LTYPE".to_owned(),
+                "100".to_owned(),
+                "AcDbSymbolTableRecord".to_owned(),
+                "100".to_owned(),
+                "AcDbLinetypeTableRecord".to_owned(),
+                "2".to_owned(),
+                name.to_owned(),
+                "70".to_owned(),
+                "0".to_owned(),
+                "3".to_owned(),
+                String::new(),
+                "72".to_owned(),
+                "65".to_owned(),
+                "73".to_owned(),
+                elements.len().to_string(),
+                "40".to_owned(),
+                elements.iter().map(|e| e.abs()).sum::<f64>().to_string(),
+            ];
+            for element in elements {
+                pairs.extend([
+                    "49".to_owned(),
+                    element.to_string(),
+                    "74".to_owned(),
+                    "0".to_owned(),
+                ]);
+            }
+            pairs.join("\n")
+        };
+        let line = |extra: &str, x: f64| {
+            format!("0\nLINE\n100\nAcDbEntity\n{extra}\n100\nAcDbLine\n10\n{x}\n20\n0\n30\n0\n11\n{x}\n21\n10\n31\n0")
+        };
+        [
+            "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n9\n$LTSCALE\n40\n2.0\n0\nENDSEC".to_owned(),
+            "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLTYPE\n70\n3".to_owned(),
+            ltype("CONTINUOUS", &[]),
+            ltype("DASHED", &[0.5, -0.25]),
+            ltype("CENTER", &[1.25, -0.25, 0.25, -0.25]),
+            "0\nENDTAB\n0\nTABLE\n2\nLAYER\n70\n2".to_owned(),
+            "0\nLAYER\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n2\n0\n70\n0\n62\n7\n6\nCONTINUOUS".to_owned(),
+            "0\nLAYER\n100\nAcDbSymbolTableRecord\n100\nAcDbLayerTableRecord\n2\nHIDDEN\n70\n0\n62\n7\n6\nDASHED".to_owned(),
+            "0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nBLOCKS".to_owned(),
+            "0\nBLOCK\n5\n20\n100\nAcDbEntity\n8\n0\n100\nAcDbBlockBegin\n2\nB\n70\n0\n10\n0\n20\n0\n30\n0\n3\nB\n1\n".to_owned(),
+            line("8\n0\n6\nBYBLOCK", 0.0),
+            "0\nENDBLK\n5\n21\n100\nAcDbEntity\n8\n0\n100\nAcDbBlockEnd".to_owned(),
+            "0\nENDSEC\n0\nSECTION\n2\nENTITIES".to_owned(),
+            line("8\nHIDDEN", 1.0),
+            line("8\n0\n6\nCENTER\n48\n0.5", 2.0),
+            line("8\nHIDDEN\n6\nCONTINUOUS", 3.0),
+            "0\nINSERT\n100\nAcDbEntity\n8\n0\n6\nDASHED\n100\nAcDbBlockReference\n2\nB\n10\n4\n20\n0\n30\n0".to_owned(),
+            "0\nENDSEC\n0\nEOF\n".to_owned(),
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn linetypes_resolve_by_layer_entity_scale_and_block() {
+        let source = linetype_fixture();
+        let opened = DxfAdapter
+            .open(
+                source.as_bytes(),
+                "linetypes.dxf",
+                None,
+                &CancellationToken::default(),
+                None,
+            )
+            .unwrap();
+        let SceneDocument::TwoD(scene) = opened.scene else {
+            panic!()
+        };
+        let dash_at = |x: f64| {
+            scene
+                .entities
+                .iter()
+                .find_map(|e| match e.geometry {
+                    Entity2DGeometry::Line { start, .. } if (start.x - x).abs() < 1e-9 => {
+                        Some(e.dash.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no line at x = {x}"))
+        };
+        // $LTSCALE 2 × layer DASHED.
+        assert_eq!(dash_at(1.0), [1.0, -0.5]);
+        // $LTSCALE 2 × entity scale 0.5 × CENTER.
+        assert_eq!(dash_at(2.0), [1.25, -0.25, 0.25, -0.25]);
+        // An explicit CONTINUOUS overrides the layer.
+        assert!(dash_at(3.0).is_empty());
+        // A ByBlock line inherits the INSERT's linetype.
+        assert_eq!(dash_at(4.0), [1.0, -0.5]);
     }
 }

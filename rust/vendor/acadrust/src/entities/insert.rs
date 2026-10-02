@@ -297,6 +297,10 @@ impl Insert {
         if common.line_weight == LineWeight::ByBlock {
             common.line_weight = self.common.line_weight;
         }
+        // CADView patch: linetype ByBlock → inherit insert's linetype.
+        if common.linetype.eq_ignore_ascii_case("ByBlock") {
+            common.linetype = self.common.linetype.clone();
+        }
     }
 
     // ── Explode ─────────────────────────────────────────────────

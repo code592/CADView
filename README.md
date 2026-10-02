@@ -19,12 +19,14 @@ has no advertising SDK and requests no network permission.
 - DXF, SVG/SVGZ, OBJ, STL, glTF/GLB and 3MF viewing. DXF includes nested and
   array block references with attributes, dimensions, multileaders, tables,
   ellipses, splines, solids and hatch boundaries; unrendered entity types are
-  reported by name.
+  reported by name. Dashed and centre linetypes are drawn from the drawing's
+  linetype table.
 - Fully offline PDF page rendering, pan and zoom.
 - Export the current 2D/3D viewport or loaded PDF page as a PNG, without
   toolbars or navigation controls. Painted annotations are included. Drawings
   with title-block sheets (for example A1/A2/A3 frames) can export each sheet
-  as its own PNG and as a PDF with one page per sheet at its paper size.
+  as its own PNG (200 dpi) and as a PDF with one page per sheet at its paper
+  size (300 dpi).
 - DWG R13-R2018+ Beta support with layouts, nested blocks, attributes and a
   validated local reopen cache.
 - Bundled OFL fonts provide offline Latin/Greek/Cyrillic, CJK, Arabic, Hebrew,

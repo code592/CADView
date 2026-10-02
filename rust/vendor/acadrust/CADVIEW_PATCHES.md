@@ -21,6 +21,8 @@ Local changes:
   them in the transformed normal's OCS, rather than treating OCS values as
   WCS (which mirrored them a second time under a (0,0,-1) INSERT or a block
   base-point shift).
+- `src/entities/insert.rs`: exploded block children with a ByBlock linetype
+  inherit the INSERT's linetype, like ByBlock color and lineweight.
 - `src/entities/explode.rs`: HATCH boundaries are 2D OCS at the hatch
   elevation; exploded LINE/ELLIPSE/SPLINE edges are converted to WCS, rational
   spline-edge weights (stored in the control point Z) are kept as weights, and
