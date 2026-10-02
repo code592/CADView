@@ -31,6 +31,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   CameraState dco_decode_box_autoadd_camera_state(dynamic raw);
 
   @protected
+  EntityCountSummary dco_decode_box_autoadd_entity_count_summary(dynamic raw);
+
+  @protected
+  double dco_decode_box_autoadd_f_64(dynamic raw);
+
+  @protected
   HitResult dco_decode_box_autoadd_hit_result(dynamic raw);
 
   @protected
@@ -49,6 +55,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DocumentEventInfo dco_decode_document_event_info(dynamic raw);
+
+  @protected
+  EntityCountSummary dco_decode_entity_count_summary(dynamic raw);
 
   @protected
   double dco_decode_f_64(dynamic raw);
@@ -75,6 +84,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
 
   @protected
+  List<VisibilityChange> dco_decode_list_visibility_change(dynamic raw);
+
+  @protected
   OpenDocumentResponse dco_decode_open_document_response(dynamic raw);
 
   @protected
@@ -82,6 +94,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
+
+  @protected
+  EntityCountSummary? dco_decode_opt_box_autoadd_entity_count_summary(
+    dynamic raw,
+  );
+
+  @protected
+  double? dco_decode_opt_box_autoadd_f_64(dynamic raw);
 
   @protected
   HitResult? dco_decode_opt_box_autoadd_hit_result(dynamic raw);
@@ -116,6 +136,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ViewportInfo dco_decode_viewport_info(dynamic raw);
 
   @protected
+  VisibilityChange dco_decode_visibility_change(dynamic raw);
+
+  @protected
   String sse_decode_String(SseDeserializer deserializer);
 
   @protected
@@ -123,6 +146,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   CameraState sse_decode_box_autoadd_camera_state(SseDeserializer deserializer);
+
+  @protected
+  EntityCountSummary sse_decode_box_autoadd_entity_count_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  double sse_decode_box_autoadd_f_64(SseDeserializer deserializer);
 
   @protected
   HitResult sse_decode_box_autoadd_hit_result(SseDeserializer deserializer);
@@ -143,6 +174,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   DocumentEventInfo sse_decode_document_event_info(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  EntityCountSummary sse_decode_entity_count_summary(
     SseDeserializer deserializer,
   );
 
@@ -173,6 +209,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
+  List<VisibilityChange> sse_decode_list_visibility_change(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   OpenDocumentResponse sse_decode_open_document_response(
     SseDeserializer deserializer,
   );
@@ -182,6 +223,14 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
+
+  @protected
+  EntityCountSummary? sse_decode_opt_box_autoadd_entity_count_summary(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  double? sse_decode_opt_box_autoadd_f_64(SseDeserializer deserializer);
 
   @protected
   HitResult? sse_decode_opt_box_autoadd_hit_result(
@@ -220,6 +269,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ViewportInfo sse_decode_viewport_info(SseDeserializer deserializer);
 
   @protected
+  VisibilityChange sse_decode_visibility_change(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
@@ -233,6 +285,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     CameraState self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_box_autoadd_entity_count_summary(
+    EntityCountSummary self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_f_64(double self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_hit_result(
@@ -261,6 +322,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_document_event_info(
     DocumentEventInfo self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_entity_count_summary(
+    EntityCountSummary self,
     SseSerializer serializer,
   );
 
@@ -298,6 +365,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_visibility_change(
+    List<VisibilityChange> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_open_document_response(
     OpenDocumentResponse self,
     SseSerializer serializer,
@@ -308,6 +381,15 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_String(String? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_opt_box_autoadd_entity_count_summary(
+    EntityCountSummary? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_f_64(double? self, SseSerializer serializer);
 
   @protected
   void sse_encode_opt_box_autoadd_hit_result(
@@ -347,6 +429,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_viewport_info(ViewportInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_visibility_change(
+    VisibilityChange self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);

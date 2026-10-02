@@ -8,9 +8,16 @@ import 'package:pdfrx_engine/pdfrx_engine.dart';
 import '../../l10n/app_localizations.dart';
 
 class PdfDocumentViewport extends StatefulWidget {
-  const PdfDocumentViewport({required this.path, super.key});
+  const PdfDocumentViewport({
+    required this.path,
+    this.captureKey,
+    this.onExportReadyChanged,
+    super.key,
+  });
 
   final String path;
+  final GlobalKey? captureKey;
+  final ValueChanged<bool>? onExportReadyChanged;
 
   @override
   State<PdfDocumentViewport> createState() => _PdfDocumentViewportState();
@@ -57,6 +64,7 @@ class _PdfDocumentViewportState extends State<PdfDocumentViewport> {
     final document = _document;
     if (document == null || index < 0 || index >= document.pages.length) return;
     final generation = ++_renderGeneration;
+    widget.onExportReadyChanged?.call(false);
     setState(() {
       _busy = true;
       _error = null;
@@ -92,6 +100,7 @@ class _PdfDocumentViewportState extends State<PdfDocumentViewport> {
       });
       previous?.dispose();
       _transformation.value = Matrix4.identity();
+      widget.onExportReadyChanged?.call(true);
     } catch (error) {
       if (mounted && generation == _renderGeneration) {
         setState(() {
@@ -121,15 +130,21 @@ class _PdfDocumentViewportState extends State<PdfDocumentViewport> {
         fit: StackFit.expand,
         children: [
           if (image != null)
-            InteractiveViewer(
-              transformationController: _transformation,
-              minScale: 0.2,
-              maxScale: 12,
-              boundaryMargin: const EdgeInsets.all(160),
-              child: Center(
-                child: AspectRatio(
-                  aspectRatio: image.width / image.height,
-                  child: RawImage(image: image, fit: BoxFit.contain),
+            RepaintBoundary(
+              key: widget.captureKey,
+              child: ColoredBox(
+                color: const Color(0xff071017),
+                child: InteractiveViewer(
+                  transformationController: _transformation,
+                  minScale: 0.2,
+                  maxScale: 12,
+                  boundaryMargin: const EdgeInsets.all(160),
+                  child: Center(
+                    child: AspectRatio(
+                      aspectRatio: image.width / image.height,
+                      child: RawImage(image: image, fit: BoxFit.contain),
+                    ),
+                  ),
                 ),
               ),
             ),

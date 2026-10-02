@@ -5,8 +5,6 @@ version = 4
 [[package]]
 name = "acadrust"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d96c49ac7520273f8fb65865995efca78f5d75fdaf11d3ba3c87114f6496b941"
 dependencies = [
  "ahash",
  "anyhow",
@@ -238,9 +236,11 @@ dependencies = [
  "base64",
  "cad-core",
  "dxf",
+ "encoding_rs",
  "flate2",
  "gltf",
  "roxmltree",
+ "serde_json",
  "stl_io",
  "tempfile",
  "tobj",
@@ -447,8 +447,6 @@ dependencies = [
 [[package]]
 name = "dxf"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb070bbb077a936e2bdf95d4b39aa83e865b38c3a7054f71d704e0796da1821"
 dependencies = [
  "byteorder",
  "chrono",

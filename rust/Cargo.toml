@@ -6,7 +6,7 @@ license = "Apache-2.0"
 
 [workspace]
 members = ["crates/cad-core", "crates/cad-formats", "crates/cad-storage"]
-exclude = ["fuzz"]
+exclude = ["fuzz", "vendor/dxf", "vendor/acadrust"]
 resolver = "2"
 
 [lib]

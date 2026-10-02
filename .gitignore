@@ -31,9 +31,12 @@ migrate_working_dir/
 .pub-cache/
 .pub/
 /build/
+/artifacts/
 /coverage/
 /rust/target/
 /rust/fuzz/target/
+/rust/vendor/dxf/target/
+/rust/vendor/acadrust/target/
 *.cdx.json
 
 # Symbolication related

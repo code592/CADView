@@ -39,7 +39,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1985162432;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1730722113;
 
 // Section: executor
 
@@ -158,6 +158,41 @@ fn wire__crate__api__document__annotation_command_impl(
                     crate::api::document::annotation_command(api_session_id, api_annotation_json)?;
                 std::result::Result::Ok(output_ok)
             })())
+        },
+    )
+}
+fn wire__crate__api__document__apply_text_layout_bounds_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "apply_text_layout_bounds",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u64>::sse_decode(&mut deserializer);
+            let api_packet = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::document::apply_text_layout_bounds(api_session_id, api_packet)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
         },
     )
 }
@@ -447,6 +482,38 @@ fn wire__crate__api__document__document_summary_impl(
         },
     )
 }
+fn wire__crate__api__document__entity_count_summary_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "entity_count_summary",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u64>::sse_decode(&mut deserializer);
+            let api_entity_id = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let output_ok =
+                    crate::api::document::entity_count_summary(api_session_id, api_entity_id)?;
+                std::result::Result::Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__document__export_annotations_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -474,6 +541,39 @@ fn wire__crate__api__document__export_annotations_impl(
                 let output_ok = crate::api::document::export_annotations(api_session_id)?;
                 std::result::Result::Ok(output_ok)
             })())
+        },
+    )
+}
+fn wire__crate__api__document__finalize_text_layout_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "finalize_text_layout",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::api::document::finalize_text_layout(api_session_id)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
         },
     )
 }
@@ -839,6 +939,39 @@ fn wire__crate__api__document__set_application_backgrounded_impl(
         },
     )
 }
+fn wire__crate__api__document__set_visibilities_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "set_visibilities",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u64>::sse_decode(&mut deserializer);
+            let api_changes =
+                <Vec<crate::api::document::VisibilityChange>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let output_ok =
+                    crate::api::document::set_visibilities(api_session_id, api_changes)?;
+                std::result::Result::Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__document__set_visibility_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -906,6 +1039,44 @@ fn wire__crate__api__document__snap_impl(
         },
     )
 }
+fn wire__crate__api__document__snap_intersection_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "snap_intersection",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u64>::sse_decode(&mut deserializer);
+            let api_x = <f64>::sse_decode(&mut deserializer);
+            let api_y = <f64>::sse_decode(&mut deserializer);
+            let api_tolerance = <f64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, String>((move || {
+                let output_ok = crate::api::document::snap_intersection(
+                    api_session_id,
+                    api_x,
+                    api_y,
+                    api_tolerance,
+                )?;
+                std::result::Result::Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__document__supported_formats_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -932,6 +1103,41 @@ fn wire__crate__api__document__supported_formats_impl(
                 let output_ok = Ok::<_, ()>(crate::api::document::supported_formats())?;
                 std::result::Result::Ok(output_ok)
             })())
+        },
+    )
+}
+fn wire__crate__api__document__text_layout_batch_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "text_layout_batch",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_session_id = <u64>::sse_decode(&mut deserializer);
+            let api_start = <u64>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok =
+                        crate::api::document::text_layout_batch(api_session_id, api_start)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
         },
     )
 }
@@ -1097,6 +1303,30 @@ impl SseDecode for crate::api::document::DocumentEventInfo {
     }
 }
 
+impl SseDecode for crate::api::document::EntityCountSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_entityKind = <String>::sse_decode(deserializer);
+        let mut var_layerId = <u64>::sse_decode(deserializer);
+        let mut var_sameKindInLayer = <u64>::sse_decode(deserializer);
+        let mut var_sameKindInDocument = <u64>::sse_decode(deserializer);
+        let mut var_sameKindLengthInLayer = <Option<f64>>::sse_decode(deserializer);
+        let mut var_sameKindLengthInDocument = <Option<f64>>::sse_decode(deserializer);
+        let mut var_sameKindAreaInLayer = <Option<f64>>::sse_decode(deserializer);
+        let mut var_sameKindAreaInDocument = <Option<f64>>::sse_decode(deserializer);
+        return crate::api::document::EntityCountSummary {
+            entity_kind: var_entityKind,
+            layer_id: var_layerId,
+            same_kind_in_layer: var_sameKindInLayer,
+            same_kind_in_document: var_sameKindInDocument,
+            same_kind_length_in_layer: var_sameKindLengthInLayer,
+            same_kind_length_in_document: var_sameKindLengthInDocument,
+            same_kind_area_in_layer: var_sameKindAreaInLayer,
+            same_kind_area_in_document: var_sameKindAreaInDocument,
+        };
+    }
+}
+
 impl SseDecode for f64 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1201,6 +1431,20 @@ impl SseDecode for Vec<u8> {
     }
 }
 
+impl SseDecode for Vec<crate::api::document::VisibilityChange> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = Vec::with_capacity(len_ as usize);
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::document::VisibilityChange>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for crate::api::document::OpenDocumentResponse {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1240,6 +1484,30 @@ impl SseDecode for Option<String> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<String>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::document::EntityCountSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::document::EntityCountSummary>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<f64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<f64>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1356,6 +1624,18 @@ impl SseDecode for crate::api::document::ViewportInfo {
     }
 }
 
+impl SseDecode for crate::api::document::VisibilityChange {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_itemId = <u64>::sse_decode(deserializer);
+        let mut var_visible = <bool>::sse_decode(deserializer);
+        return crate::api::document::VisibilityChange {
+            item_id: var_itemId,
+            visible: var_visible,
+        };
+    }
+}
+
 impl SseDecode for i32 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1372,16 +1652,26 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        5 => {
+        4 => wire__crate__api__document__apply_text_layout_bounds_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        6 => {
             wire__crate__api__document__camera_state_default_impl(port, ptr, rust_vec_len, data_len)
         }
-        12 => wire__crate__api__document__document_summary_impl(port, ptr, rust_vec_len, data_len),
-        14 => {
+        13 => wire__crate__api__document__document_summary_impl(port, ptr, rust_vec_len, data_len),
+        16 => {
+            wire__crate__api__document__finalize_text_layout_impl(port, ptr, rust_vec_len, data_len)
+        }
+        17 => {
             wire__crate__api__document__finish_open_document_impl(port, ptr, rust_vec_len, data_len)
         }
-        16 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__document__open_document_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__document__viewport_document_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__document__open_document_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__document__text_layout_batch_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__document__viewport_document_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1397,31 +1687,34 @@ fn pde_ffi_dispatcher_sync_impl(
         1 => wire__crate__api__document__add_text_annotation_impl(ptr, rust_vec_len, data_len),
         2 => wire__crate__api__document__add_text_annotation_3d_impl(ptr, rust_vec_len, data_len),
         3 => wire__crate__api__document__annotation_command_impl(ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__document__begin_open_document_impl(ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__document__cancel_open_document_impl(ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__document__close_document_impl(ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__document__close_viewport_impl(ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__document__configure_cache_impl(ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__document__create_viewport_impl(ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__document__delete_annotation_impl(ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__document__export_annotations_impl(ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__document__hit_test_impl(ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__document__load_annotations_impl(ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__document__measure_distance_2d_impl(ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__document__measure_distance_3d_impl(ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__document__poll_document_events_impl(ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__document__redo_impl(ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__document__save_annotations_impl(ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__document__set_application_backgrounded_impl(
+        5 => wire__crate__api__document__begin_open_document_impl(ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__document__cancel_open_document_impl(ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__document__close_document_impl(ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__document__close_viewport_impl(ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__document__configure_cache_impl(ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__document__create_viewport_impl(ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__document__delete_annotation_impl(ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__document__entity_count_summary_impl(ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__document__export_annotations_impl(ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__document__hit_test_impl(ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__document__load_annotations_impl(ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__document__measure_distance_2d_impl(ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__document__measure_distance_3d_impl(ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__document__poll_document_events_impl(ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__document__redo_impl(ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__document__save_annotations_impl(ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__document__set_application_backgrounded_impl(
             ptr,
             rust_vec_len,
             data_len,
         ),
-        25 => wire__crate__api__document__set_visibility_impl(ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__document__snap_impl(ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__document__supported_formats_impl(ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__document__undo_impl(ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__document__update_camera_impl(ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__document__set_visibilities_impl(ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__document__set_visibility_impl(ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__document__snap_impl(ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__document__snap_intersection_impl(ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__document__supported_formats_impl(ptr, rust_vec_len, data_len),
+        34 => wire__crate__api__document__undo_impl(ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__document__update_camera_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1475,6 +1768,35 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::document::DocumentEventInfo>
     for crate::api::document::DocumentEventInfo
 {
     fn into_into_dart(self) -> crate::api::document::DocumentEventInfo {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::document::EntityCountSummary {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.entity_kind.into_into_dart().into_dart(),
+            self.layer_id.into_into_dart().into_dart(),
+            self.same_kind_in_layer.into_into_dart().into_dart(),
+            self.same_kind_in_document.into_into_dart().into_dart(),
+            self.same_kind_length_in_layer.into_into_dart().into_dart(),
+            self.same_kind_length_in_document
+                .into_into_dart()
+                .into_dart(),
+            self.same_kind_area_in_layer.into_into_dart().into_dart(),
+            self.same_kind_area_in_document.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::document::EntityCountSummary
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::document::EntityCountSummary>
+    for crate::api::document::EntityCountSummary
+{
+    fn into_into_dart(self) -> crate::api::document::EntityCountSummary {
         self
     }
 }
@@ -1621,6 +1943,27 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::document::ViewportInfo>
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::document::VisibilityChange {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.item_id.into_into_dart().into_dart(),
+            self.visible.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::document::VisibilityChange
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::document::VisibilityChange>
+    for crate::api::document::VisibilityChange
+{
+    fn into_into_dart(self) -> crate::api::document::VisibilityChange {
+        self
+    }
+}
 
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -1657,6 +2000,20 @@ impl SseEncode for crate::api::document::DocumentEventInfo {
         <f64>::sse_encode(self.progress, serializer);
         <Option<String>>::sse_encode(self.message, serializer);
         <Option<u64>>::sse_encode(self.session_id, serializer);
+    }
+}
+
+impl SseEncode for crate::api::document::EntityCountSummary {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.entity_kind, serializer);
+        <u64>::sse_encode(self.layer_id, serializer);
+        <u64>::sse_encode(self.same_kind_in_layer, serializer);
+        <u64>::sse_encode(self.same_kind_in_document, serializer);
+        <Option<f64>>::sse_encode(self.same_kind_length_in_layer, serializer);
+        <Option<f64>>::sse_encode(self.same_kind_length_in_document, serializer);
+        <Option<f64>>::sse_encode(self.same_kind_area_in_layer, serializer);
+        <Option<f64>>::sse_encode(self.same_kind_area_in_document, serializer);
     }
 }
 
@@ -1738,6 +2095,16 @@ impl SseEncode for Vec<u8> {
     }
 }
 
+impl SseEncode for Vec<crate::api::document::VisibilityChange> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::document::VisibilityChange>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for crate::api::document::OpenDocumentResponse {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1765,6 +2132,26 @@ impl SseEncode for Option<String> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <String>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::document::EntityCountSummary> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::document::EntityCountSummary>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<f64> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <f64>::sse_encode(value, serializer);
         }
     }
 }
@@ -1855,6 +2242,14 @@ impl SseEncode for crate::api::document::ViewportInfo {
         <u32>::sse_encode(self.width, serializer);
         <u32>::sse_encode(self.height, serializer);
         <f64>::sse_encode(self.pixel_ratio, serializer);
+    }
+}
+
+impl SseEncode for crate::api::document::VisibilityChange {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u64>::sse_encode(self.item_id, serializer);
+        <bool>::sse_encode(self.visible, serializer);
     }
 }
 

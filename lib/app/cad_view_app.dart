@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 import '../core/cad_engine.dart';
+import '../core/cad_fonts.dart';
 import '../core/distribution.dart';
+import '../core/recent_files.dart';
 import '../core/ui_preferences.dart';
 import '../features/home/home_page.dart';
 import '../l10n/app_localizations.dart';
@@ -11,11 +13,13 @@ class CadViewApp extends StatefulWidget {
   const CadViewApp({
     required this.engine,
     this.advertising = const DisabledAdvertisingService(),
+    this.recentFiles = const RecentFilesStore(),
     super.key,
   });
 
   final CadEngine engine;
   final AdvertisingService advertising;
+  final RecentFilesStore recentFiles;
 
   @override
   State<CadViewApp> createState() => _CadViewAppState();
@@ -23,6 +27,8 @@ class CadViewApp extends StatefulWidget {
 
 class _CadViewAppState extends State<CadViewApp> with WidgetsBindingObserver {
   String _localeTag = 'system';
+  int _decimalPlaces = UiPreferences.defaultDecimalPlaces;
+  int _preferenceRevision = 0;
 
   @override
   void initState() {
@@ -32,17 +38,38 @@ class _CadViewAppState extends State<CadViewApp> with WidgetsBindingObserver {
   }
 
   Future<void> _loadUiPreferences() async {
+    final revision = _preferenceRevision;
     final preferences = await UiPreferences.load();
-    if (mounted) setState(() => _localeTag = preferences.localeTag);
+    if (mounted && revision == _preferenceRevision) {
+      setState(() {
+        _localeTag = preferences.localeTag;
+        _decimalPlaces = preferences.decimalPlaces;
+      });
+    }
   }
 
   Future<void> _setLocale(String tag) async {
     if (!UiPreferences.supportedLocaleTags.contains(tag)) return;
+    _preferenceRevision++;
     setState(() => _localeTag = tag);
+    await _saveUiPreferences();
+  }
+
+  Future<void> _setDecimalPlaces(int value) async {
+    if (!UiPreferences.supportedDecimalPlaces.contains(value)) return;
+    _preferenceRevision++;
+    setState(() => _decimalPlaces = value);
+    await _saveUiPreferences();
+  }
+
+  Future<void> _saveUiPreferences() async {
     try {
-      await UiPreferences(localeTag: tag).save();
+      await UiPreferences(
+        localeTag: _localeTag,
+        decimalPlaces: _decimalPlaces,
+      ).save();
     } catch (_) {
-      // A settings write failure must not prevent an in-memory language change.
+      // A settings write failure must not prevent an in-memory preference change.
     }
   }
 
@@ -104,6 +131,8 @@ class _CadViewAppState extends State<CadViewApp> with WidgetsBindingObserver {
       localeListResolutionCallback: (preferred, supported) =>
           AppLocalizations.resolve(preferred),
       theme: ThemeData(
+        fontFamily: 'CADView Noto Sans',
+        fontFamilyFallback: cadFontFallback,
         colorScheme: scheme,
         scaffoldBackgroundColor: const Color(0xff0b1118),
         useMaterial3: true,
@@ -120,8 +149,11 @@ class _CadViewAppState extends State<CadViewApp> with WidgetsBindingObserver {
       home: HomePage(
         engine: widget.engine,
         advertising: widget.advertising,
+        recentFiles: widget.recentFiles,
         localeTag: _localeTag,
         onLocaleChanged: _setLocale,
+        decimalPlaces: _decimalPlaces,
+        onDecimalPlacesChanged: _setDecimalPlaces,
       ),
     );
   }

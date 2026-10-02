@@ -21,11 +21,21 @@ jobs:
         with:
           components: rustfmt
       - run: flutter pub get
-      - run: dart format --output=none --set-exit-if-changed lib test
+      - run: dart format --output=none --set-exit-if-changed lib test integration_test test_driver scripts/render_cad_fonts.dart
       - run: flutter analyze
       - run: flutter test
+      - run: bash scripts/check_cad_fonts.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: multilingual-render-check
+          path: artifacts/qa/*.png
       - run: cargo fmt --manifest-path rust/Cargo.toml --all --check
       - run: cargo test --manifest-path rust/Cargo.toml --workspace --locked
+      - run: cargo test --manifest-path rust/vendor/dxf/Cargo.toml --lib --locked
+        env:
+          TZ: UTC
+      - run: cargo test --manifest-path rust/vendor/acadrust/Cargo.toml --lib --locked
       - run: bash scripts/verify_offline_manifest.sh
 
   android-debug:

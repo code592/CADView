@@ -23,6 +23,10 @@ open class CadViewActivityBase : FlutterActivity() {
             "image/vnd.dwg",
             "application/dxf",
             "application/x-dxf",
+            "application/vnd.dxf",
+            "image/x-dxf",
+            "application/x-dwg",
+            "image/x-dwg",
             "image/vnd.dxf",
             "model/stl",
             "application/vnd.ms-pki.stl",
@@ -178,18 +182,15 @@ open class CadViewActivityBase : FlutterActivity() {
     }
 
     private fun copyIncomingFile(uri: Uri): String? = runCatching {
-        val importDirectory = File(filesDir, "imports").apply { mkdirs() }
+        val importDirectory = File(File(filesDir, "imports"), UUID.randomUUID().toString())
+            .apply { check(mkdirs()) }
         val originalName = queryDisplayName(uri)
             ?: uri.lastPathSegment?.substringAfterLast('/')
             ?: "document"
         val safeName = originalName
-            .replace(Regex("[^A-Za-z0-9._-]"), "_")
-            .takeLast(180)
-            .ifBlank { "document" }
-        val destination = File(
-            importDirectory,
-            "${System.currentTimeMillis()}_${UUID.randomUUID()}_$safeName",
-        )
+            .replace(Regex("[\\\\/\\x00-\\x1f]"), "_")
+            .takeUnless { it.isBlank() || it == "." || it == ".." } ?: "document"
+        val destination = File(importDirectory, safeName)
         val input = requireNotNull(contentResolver.openInputStream(uri)) {
             "Unable to read shared file"
         }

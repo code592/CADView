@@ -5,10 +5,11 @@ edition = "2021"
 license = "Apache-2.0"
 
 [dependencies]
-acadrust = "=0.4.1"
+acadrust = { version = "=0.4.1", path = "../../vendor/acadrust" }
 base64 = "0.22"
 cad-core = { path = "../cad-core", version = "0.1.0" }
-dxf = "0.6.1"
+dxf = { version = "=0.6.1", path = "../../vendor/dxf" }
+encoding_rs = "=0.8.35"
 flate2 = "1.1"
 gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions"] }
 roxmltree = "0.20"
@@ -17,4 +18,5 @@ tobj = "4.0"
 zip = { version = "4.6", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+serde_json = "1.0"
 tempfile = "3.22"

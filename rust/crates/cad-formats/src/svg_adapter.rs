@@ -78,30 +78,30 @@ impl FormatAdapter for SvgAdapter {
             }
             let geometry = match node.tag_name().name() {
                 "line" => Some(Entity2DGeometry::Line {
-                    start: Point2::new(number(&node, "x1"), number(&node, "y1")),
-                    end: Point2::new(number(&node, "x2"), number(&node, "y2")),
+                    start: Point2::new(number(&node, "x1"), -number(&node, "y1")),
+                    end: Point2::new(number(&node, "x2"), -number(&node, "y2")),
                 }),
                 "rect" => {
                     let x = number(&node, "x");
-                    let y = number(&node, "y");
+                    let y = -number(&node, "y");
                     let width = number(&node, "width");
                     let height = number(&node, "height");
                     Some(Entity2DGeometry::Polyline {
                         points: vec![
                             Point2::new(x, y),
                             Point2::new(x + width, y),
-                            Point2::new(x + width, y + height),
-                            Point2::new(x, y + height),
+                            Point2::new(x + width, y - height),
+                            Point2::new(x, y - height),
                         ],
                         closed: true,
                     })
                 }
                 "circle" => Some(Entity2DGeometry::Circle {
-                    center: Point2::new(number(&node, "cx"), number(&node, "cy")),
+                    center: Point2::new(number(&node, "cx"), -number(&node, "cy")),
                     radius: number(&node, "r").abs(),
                 }),
                 "ellipse" => {
-                    let center = Point2::new(number(&node, "cx"), number(&node, "cy"));
+                    let center = Point2::new(number(&node, "cx"), -number(&node, "cy"));
                     let rx = number(&node, "rx").abs();
                     let ry = number(&node, "ry").abs();
                     Some(Entity2DGeometry::Polyline {
@@ -122,14 +122,33 @@ impl FormatAdapter for SvgAdapter {
                     closed: node.tag_name().name() == "polygon",
                 }),
                 "text" => Some(Entity2DGeometry::Text {
-                    origin: Point2::new(number(&node, "x"), number(&node, "y")),
+                    // SVG has a downward Y axis. Scene2D uses an upward Y axis;
+                    // convert the insertion point, not the upright glyph shape.
+                    origin: Point2::new(number(&node, "x"), -number(&node, "y")),
                     value: node
                         .descendants()
                         .filter(roxmltree::Node::is_text)
                         .filter_map(|child| child.text())
                         .collect(),
                     height: style_number(&node, "font-size").unwrap_or(16.0),
+                    height_reference: cad_core::TextHeightReference2D::Em,
                     rotation: 0.0,
+                    width_factor: 1.0,
+                    oblique_angle: 0.0,
+                    horizontal_alignment: Default::default(),
+                    vertical_alignment: Default::default(),
+                    target_width: None,
+                    uniform_fit: false,
+                    wrap_width: None,
+                    line_spacing: None,
+                    columns: None,
+                    background: None,
+                    mirrored_x: false,
+                    mirrored_y: false,
+                    font_family: None,
+                    text_runs: Vec::new(),
+                    text_warnings: Vec::new(),
+                    plane: None,
                 }),
                 "path" => {
                     unsupported_paths += 1;
@@ -142,6 +161,8 @@ impl FormatAdapter for SvgAdapter {
                     id: entities.len() as u64 + 1,
                     layer_id: 1,
                     color_argb: 0xffe5e7eb,
+                    stroke_width: 0.0,
+                    filled: false,
                     geometry,
                 });
             }
@@ -260,7 +281,7 @@ fn parse_points(value: &str) -> Vec<Point2> {
         .collect::<Vec<_>>();
     values
         .chunks_exact(2)
-        .map(|pair| Point2::new(pair[0], pair[1]))
+        .map(|pair| Point2::new(pair[0], -pair[1]))
         .collect()
 }
 
@@ -292,7 +313,18 @@ mod tests {
             )
             .unwrap();
         match opened.scene {
-            SceneDocument::TwoD(scene) => assert_eq!(scene.entities.len(), 2),
+            SceneDocument::TwoD(scene) => {
+                assert_eq!(scene.entities.len(), 2);
+                let Entity2DGeometry::Line { start, end } = scene.entities[0].geometry else {
+                    panic!("expected line");
+                };
+                assert_eq!(start, Point2::new(0.0, -1.0));
+                assert_eq!(end, Point2::new(2.0, -3.0));
+                assert_eq!(
+                    parse_points("1,2 3,4"),
+                    vec![Point2::new(1.0, -2.0), Point2::new(3.0, -4.0)]
+                );
+            }
             _ => panic!("expected a 2D scene"),
         }
     }
@@ -314,9 +346,15 @@ mod tests {
         let SceneDocument::TwoD(scene) = opened.scene else {
             panic!("expected a 2D scene");
         };
-        let Entity2DGeometry::Text { value, .. } = &scene.entities[0].geometry else {
+        let Entity2DGeometry::Text {
+            value,
+            height_reference,
+            ..
+        } = &scene.entities[0].geometry
+        else {
             panic!("expected text");
         };
         assert_eq!(value, "中文CAD");
+        assert_eq!(*height_reference, cad_core::TextHeightReference2D::Em);
     }
 }

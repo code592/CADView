@@ -129,12 +129,13 @@ import UserMessagingPlatform
       let directory = base
         .appendingPathComponent("CADView", isDirectory: true)
         .appendingPathComponent("imports", isDirectory: true)
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
       try FileManager.default.createDirectory(
         at: directory,
         withIntermediateDirectories: true
       )
       let name = source.lastPathComponent.isEmpty ? "document" : source.lastPathComponent
-      let destination = directory.appendingPathComponent("\(UUID().uuidString)_\(name)")
+      let destination = directory.appendingPathComponent(name)
       var coordinatedError: NSError?
       var copyError: Error?
       let coordinator = NSFileCoordinator()

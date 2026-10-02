@@ -37,6 +37,14 @@
                 <data android:mimeType="image/svg+xml"/>
                 <data android:mimeType="application/dxf"/>
                 <data android:mimeType="application/x-dxf"/>
+                <data android:mimeType="application/vnd.dxf"/>
+                <data android:mimeType="image/x-dxf"/>
+                <data android:mimeType="application/x-dwg"/>
+                <data android:mimeType="image/x-dwg"/>
+                <!-- Many providers label DXF/OBJ as plain text and DWG as
+                     generic binary. The native core still validates bytes. -->
+                <data android:mimeType="text/plain"/>
+                <data android:mimeType="application/octet-stream"/>
                 <data android:mimeType="image/vnd.dxf"/>
                 <data android:mimeType="application/dwg"/>
                 <data android:mimeType="application/acad"/>
@@ -58,6 +66,14 @@
                 <data android:mimeType="image/svg+xml"/>
                 <data android:mimeType="application/dxf"/>
                 <data android:mimeType="application/x-dxf"/>
+                <data android:mimeType="application/vnd.dxf"/>
+                <data android:mimeType="image/x-dxf"/>
+                <data android:mimeType="application/x-dwg"/>
+                <data android:mimeType="image/x-dwg"/>
+                <!-- Many providers label DXF/OBJ as plain text and DWG as
+                     generic binary. The native core still validates bytes. -->
+                <data android:mimeType="text/plain"/>
+                <data android:mimeType="application/octet-stream"/>
                 <data android:mimeType="image/vnd.dxf"/>
                 <data android:mimeType="application/dwg"/>
                 <data android:mimeType="application/acad"/>
@@ -79,6 +95,14 @@
                 <data android:mimeType="image/svg+xml"/>
                 <data android:mimeType="application/dxf"/>
                 <data android:mimeType="application/x-dxf"/>
+                <data android:mimeType="application/vnd.dxf"/>
+                <data android:mimeType="image/x-dxf"/>
+                <data android:mimeType="application/x-dwg"/>
+                <data android:mimeType="image/x-dwg"/>
+                <!-- Many providers label DXF/OBJ as plain text and DWG as
+                     generic binary. The native core still validates bytes. -->
+                <data android:mimeType="text/plain"/>
+                <data android:mimeType="application/octet-stream"/>
                 <data android:mimeType="image/vnd.dxf"/>
                 <data android:mimeType="application/dwg"/>
                 <data android:mimeType="application/acad"/>

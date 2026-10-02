@@ -1,9 +1,16 @@
+mod affine2d;
+mod curves;
 mod dwg_adapter;
 mod dxf_adapter;
+mod dxf_raw;
 mod mesh_adapters;
+mod mleader;
+mod ocs_curves;
 mod pending_adapters;
 mod svg_adapter;
+mod text_coordinates;
 mod text_normalization;
+mod units;
 
 use cad_core::FormatRegistry;
 
@@ -27,3 +34,5 @@ pub fn default_registry() -> FormatRegistry {
     registry.register(IgesAdapter);
     registry
 }
+#[cfg(test)]
+mod dxf_dwg_parity_tests;

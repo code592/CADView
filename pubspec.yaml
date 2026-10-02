@@ -46,6 +46,8 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  integration_test:
+    sdk: flutter
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is
@@ -68,6 +70,82 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+  assets:
+    - third_party_licenses/NotoSansCJK-OFL-1.1.txt
+    - third_party_licenses/NotoFonts-OFL-1.1.txt
+
+  # Deterministic offline fallback for DWG/DXF SHX styles. Noto Sans CJK is
+  # redistributed unmodified under SIL OFL 1.1; see third_party_licenses/.
+  fonts:
+    - family: CADView Noto Sans
+      fonts:
+        - asset: assets/fonts/NotoSans-Regular.ttf
+    - family: CADView Noto CJK
+      fonts:
+        - asset: assets/fonts/NotoSansCJKsc-Regular.otf
+    - family: CADView Noto Arabic
+      fonts:
+        - asset: assets/fonts/NotoSansArabic-Regular.ttf
+    - family: CADView Noto Hebrew
+      fonts:
+        - asset: assets/fonts/NotoSansHebrew-Regular.ttf
+    - family: CADView Noto Thai
+      fonts:
+        - asset: assets/fonts/NotoSansThai-Regular.ttf
+    - family: CADView Noto Devanagari
+      fonts:
+        - asset: assets/fonts/NotoSansDevanagari-Regular.ttf
+    - family: CADView Noto Bengali
+      fonts:
+        - asset: assets/fonts/NotoSansBengali-Regular.ttf
+    - family: CADView Noto Gujarati
+      fonts:
+        - asset: assets/fonts/NotoSansGujarati-Regular.ttf
+    - family: CADView Noto Gurmukhi
+      fonts:
+        - asset: assets/fonts/NotoSansGurmukhi-Regular.ttf
+    - family: CADView Noto Tamil
+      fonts:
+        - asset: assets/fonts/NotoSansTamil-Regular.ttf
+    - family: CADView Noto Telugu
+      fonts:
+        - asset: assets/fonts/NotoSansTelugu-Regular.ttf
+    - family: CADView Noto Kannada
+      fonts:
+        - asset: assets/fonts/NotoSansKannada-Regular.ttf
+    - family: CADView Noto Malayalam
+      fonts:
+        - asset: assets/fonts/NotoSansMalayalam-Regular.ttf
+    - family: CADView Noto Sinhala
+      fonts:
+        - asset: assets/fonts/NotoSansSinhala-Regular.ttf
+    - family: CADView Noto Lao
+      fonts:
+        - asset: assets/fonts/NotoSansLao-Regular.ttf
+    - family: CADView Noto Khmer
+      fonts:
+        - asset: assets/fonts/NotoSansKhmer-Regular.ttf
+    - family: CADView Noto Myanmar
+      fonts:
+        - asset: assets/fonts/NotoSansMyanmar-Regular.ttf
+    - family: CADView Noto Armenian
+      fonts:
+        - asset: assets/fonts/NotoSansArmenian-Regular.ttf
+    - family: CADView Noto Georgian
+      fonts:
+        - asset: assets/fonts/NotoSansGeorgian-Regular.ttf
+    - family: CADView Noto Ethiopic
+      fonts:
+        - asset: assets/fonts/NotoSansEthiopic-Regular.ttf
+    - family: CADView Noto Tibetan
+      fonts:
+        - asset: assets/fonts/NotoSerifTibetan-Regular.ttf
+    - family: CADView Noto Symbols
+      fonts:
+        - asset: assets/fonts/NotoSansSymbols-Regular.ttf
+    - family: CADView Noto Symbols 2
+      fonts:
+        - asset: assets/fonts/NotoSansSymbols2-Regular.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:
@@ -80,7 +158,7 @@ flutter:
   # For details regarding adding assets from package dependencies, see
   # https://flutter.dev/to/asset-from-package
 
-  # To add custom fonts to your application, add a fonts section here,
+  # To add more custom fonts to your application, extend the fonts section,
   # in this "flutter" section. Each entry in this list should have a
   # "family" key with the font family name, and a "fonts" key with a
   # list giving the asset and other descriptors for the font. For

@@ -22,6 +22,10 @@
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>com.adobe.pdf</string>
+				<!-- File providers may expose CAD files as generic data rather
+				     than our imported UTI. The parser validates their contents. -->
+				<string>public.data</string>
+				<string>public.svg-image</string>
 				<string>org.cadview.cad-2d</string>
 				<string>org.cadview.svg</string>
 				<string>org.cadview.mesh</string>

@@ -7,6 +7,7 @@ class CadDocumentModel {
     required this.sceneKind,
     required this.scene,
     required this.diagnostics,
+    this.units,
   });
 
   factory CadDocumentModel.fromJson(Map<String, dynamic> json) {
@@ -15,6 +16,7 @@ class CadDocumentModel {
     return CadDocumentModel(
       format: metadata['format'] as String,
       displayName: metadata['display_name'] as String,
+      units: metadata['units'] as String?,
       sceneKind: sceneEnvelope['scene_kind'] as String,
       scene: sceneEnvelope['scene'] as Map<String, dynamic>,
       diagnostics: (json['diagnostics'] as List<dynamic>)
@@ -24,6 +26,7 @@ class CadDocumentModel {
 
   final String format;
   final String displayName;
+  final String? units;
   final String sceneKind;
   final Map<String, dynamic> scene;
   final List<Map<String, dynamic>> diagnostics;
@@ -34,6 +37,20 @@ class CadDocumentModel {
   late final List<Map<String, dynamic>> meshes = _decodeMeshes();
   late final List<CadAssemblyNode> assemblyRoots = _decodeAssemblyRoots();
   late final Set<int> visibleMeshIds = _decodeVisibleMeshIds();
+
+  CadDocumentModel withLayerStateFrom(CadDocumentModel source) {
+    if (sceneKind != 'two_d' || source.sceneKind != 'two_d') return source;
+    final retainedScene = Map<String, dynamic>.from(scene)
+      ..['layers'] = source.scene['layers'];
+    return CadDocumentModel(
+      format: format,
+      displayName: displayName,
+      units: units,
+      sceneKind: sceneKind,
+      scene: retainedScene,
+      diagnostics: diagnostics,
+    );
+  }
 
   List<CadLayerModel> _decodeLayers() {
     if (sceneKind != 'two_d') return const [];

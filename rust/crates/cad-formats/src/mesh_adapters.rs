@@ -1,8 +1,9 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use cad_core::{
-    fingerprint, AssemblyNode, CadError, CancellationToken, DocumentMetadata, FormatAdapter,
-    FormatCapabilities, FormatDiagnostic, FormatId, Mesh3D, OpenedDocument, Point3, Scene3D,
-    SceneDocument, SceneKind, SceneSink, SupportLevel,
+    fingerprint, mesh_surface_area, mesh_volume_properties, AssemblyNode, CadError,
+    CancellationToken, DocumentMetadata, FormatAdapter, FormatCapabilities, FormatDiagnostic,
+    FormatId, Mesh3D, OpenedDocument, Point3, Scene3D, SceneDocument, SceneKind, SceneSink,
+    SupportLevel,
 };
 use gltf::buffer::Source as BufferSource;
 use std::{
@@ -90,10 +91,22 @@ impl FormatAdapter for ObjAdapter {
                     normals,
                     indices: model.mesh.indices,
                     material_index: model.mesh.material_id.map(|value| value as u32),
+                    surface_area: None,
+                    closed_manifold: None,
+                    enclosed_volume: None,
+                    volume_centroid: None,
                 }
             })
             .collect();
-        finish_mesh_document(FormatId::Obj, display_name, bytes, meshes, Vec::new(), sink)
+        finish_mesh_document(
+            FormatId::Obj,
+            display_name,
+            bytes,
+            meshes,
+            Vec::new(),
+            None,
+            sink,
+        )
     }
 }
 
@@ -142,6 +155,10 @@ impl FormatAdapter for StlAdapter {
                 .map(|value| value as u32)
                 .collect(),
             material_index: None,
+            surface_area: None,
+            closed_manifold: None,
+            enclosed_volume: None,
+            volume_centroid: None,
         };
         finish_mesh_document(
             FormatId::Stl,
@@ -149,6 +166,7 @@ impl FormatAdapter for StlAdapter {
             bytes,
             vec![mesh],
             Vec::new(),
+            None,
             sink,
         )
     }
@@ -223,6 +241,10 @@ impl FormatAdapter for GltfAdapter {
                     normals,
                     indices,
                     material_index: primitive.material().index().map(|value| value as u32),
+                    surface_area: None,
+                    closed_manifold: None,
+                    enclosed_volume: None,
+                    volume_centroid: None,
                 });
             }
         }
@@ -232,6 +254,7 @@ impl FormatAdapter for GltfAdapter {
             bytes,
             meshes,
             Vec::new(),
+            Some("m"),
             sink,
         )
     }
@@ -300,6 +323,7 @@ impl FormatAdapter for ThreeMfAdapter {
             .map_err(CadError::Io)?;
         let document = roxmltree::Document::parse(&xml)
             .map_err(|error| CadError::InvalidDocument(format!("3MF XML failed: {error}")))?;
+        let unit_id = three_mf_unit_id(document.root_element().attribute("unit"));
         let mut meshes = Vec::new();
         for object in document
             .descendants()
@@ -347,6 +371,10 @@ impl FormatAdapter for ThreeMfAdapter {
                     normals: Vec::new(),
                     indices,
                     material_index: None,
+                    surface_area: None,
+                    closed_manifold: None,
+                    enclosed_volume: None,
+                    volume_centroid: None,
                 });
             }
         }
@@ -356,6 +384,7 @@ impl FormatAdapter for ThreeMfAdapter {
             bytes,
             meshes,
             Vec::new(),
+            unit_id,
             sink,
         )
     }
@@ -403,18 +432,39 @@ fn load_gltf_buffers(
     Ok(buffers)
 }
 
+fn three_mf_unit_id(value: Option<&str>) -> Option<&'static str> {
+    match value.unwrap_or("millimeter") {
+        "micron" => Some("micron"),
+        "millimeter" => Some("mm"),
+        "centimeter" => Some("cm"),
+        "inch" => Some("in"),
+        "foot" => Some("ft"),
+        "meter" => Some("m"),
+        _ => None,
+    }
+}
+
 fn finish_mesh_document(
     format: FormatId,
     display_name: &str,
     bytes: &[u8],
-    meshes: Vec<Mesh3D>,
+    mut meshes: Vec<Mesh3D>,
     diagnostics: Vec<FormatDiagnostic>,
+    units: Option<&str>,
     mut sink: Option<&mut dyn SceneSink>,
 ) -> Result<OpenedDocument, CadError> {
     if meshes.is_empty() {
         return Err(CadError::InvalidDocument(
             "document contains no renderable mesh".to_owned(),
         ));
+    }
+    for mesh in &mut meshes {
+        mesh.surface_area = mesh_surface_area(&mesh.positions, &mesh.indices);
+        if let Some(properties) = mesh_volume_properties(&mesh.positions, &mesh.indices) {
+            mesh.closed_manifold = Some(properties.closed_manifold);
+            mesh.enclosed_volume = properties.enclosed_volume;
+            mesh.volume_centroid = properties.volume_centroid;
+        }
     }
     let children = meshes
         .iter()
@@ -446,7 +496,7 @@ fn finish_mesh_document(
             display_name: display_name.to_owned(),
             fingerprint: fingerprint(bytes),
             byte_length: bytes.len() as u64,
-            units: None,
+            units: units.map(str::to_owned),
             author: None,
         },
         scene: SceneDocument::ThreeD(scene),
@@ -510,8 +560,23 @@ mod tests {
             SceneDocument::ThreeD(scene) => {
                 assert_eq!(scene.stats.vertex_count, 3);
                 assert_eq!(scene.stats.triangle_count, 1);
+                assert_eq!(scene.meshes[0].surface_area, Some(0.5));
+                assert_eq!(scene.meshes[0].closed_manifold, Some(false));
+                assert_eq!(scene.meshes[0].enclosed_volume, None);
+                assert_eq!(scene.meshes[0].volume_centroid, None);
             }
             _ => panic!("expected a 3D scene"),
         }
+    }
+
+    #[test]
+    fn maps_3mf_declared_units_and_spec_default() {
+        assert_eq!(three_mf_unit_id(None), Some("mm"));
+        assert_eq!(three_mf_unit_id(Some("micron")), Some("micron"));
+        assert_eq!(three_mf_unit_id(Some("centimeter")), Some("cm"));
+        assert_eq!(three_mf_unit_id(Some("inch")), Some("in"));
+        assert_eq!(three_mf_unit_id(Some("foot")), Some("ft"));
+        assert_eq!(three_mf_unit_id(Some("meter")), Some("m"));
+        assert_eq!(three_mf_unit_id(Some("unsupported")), None);
     }
 }

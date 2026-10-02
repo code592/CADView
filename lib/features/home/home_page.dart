@@ -7,10 +7,12 @@ import 'package:flutter/material.dart';
 import '../../core/cad_engine.dart';
 import '../../core/cad_file_types.dart';
 import '../../core/distribution.dart';
+import '../../core/document_details.dart';
 import '../../core/incoming_documents.dart';
 import '../../core/native_document_picker.dart';
 import '../../core/native_paths.dart';
 import '../../core/privacy_preferences.dart';
+import '../../core/recent_files.dart';
 import '../../l10n/app_localizations.dart';
 import '../viewer/cad_viewer_page.dart';
 
@@ -18,15 +20,21 @@ class HomePage extends StatefulWidget {
   const HomePage({
     required this.engine,
     required this.advertising,
+    required this.recentFiles,
     required this.localeTag,
     required this.onLocaleChanged,
+    required this.decimalPlaces,
+    required this.onDecimalPlacesChanged,
     super.key,
   });
 
   final CadEngine engine;
   final AdvertisingService advertising;
+  final RecentFilesStore recentFiles;
   final String localeTag;
   final Future<void> Function(String tag) onLocaleChanged;
+  final int decimalPlaces;
+  final Future<void> Function(int value) onDecimalPlacesChanged;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -44,6 +52,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _openStage = 'preparing';
   String? _error;
   PrivacyPreferences _privacy = const PrivacyPreferences.defaults();
+  List<RecentFileEntry> _recentFiles = const [];
 
   @override
   void initState() {
@@ -58,7 +67,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _enqueueIncomingFile,
     );
     unawaited(IncomingDocuments.initialize());
+    unawaited(_restoreRecentFiles());
     if (widget.advertising.available) unawaited(_restorePrivacy());
+  }
+
+  Future<void> _restoreRecentFiles() async {
+    final recentFiles = await widget.recentFiles.load();
+    if (mounted) setState(() => _recentFiles = recentFiles);
+  }
+
+  Future<void> _removeRecentFile(String path) async {
+    final recentFiles = await widget.recentFiles.remove(path);
+    if (mounted) setState(() => _recentFiles = recentFiles);
+  }
+
+  Future<void> _clearRecentFiles() async {
+    await widget.recentFiles.clear();
+    if (mounted) setState(() => _recentFiles = const []);
+  }
+
+  Future<void> _openRecentFile(RecentFileEntry entry) async {
+    if (!await File(entry.path).exists()) {
+      final recentFiles = await widget.recentFiles.remove(entry.path);
+      if (!mounted) return;
+      setState(() {
+        _recentFiles = recentFiles;
+        _error = context.l10n.text('recentFileMissing');
+      });
+      return;
+    }
+    await _openDocumentPath(entry.path);
   }
 
   void _enqueueIncomingFile(String path) {
@@ -119,19 +157,27 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ListTile(
                 leading: const Icon(Icons.language),
                 title: Text(l10n.text('language')),
-              ),
-              RadioGroup<String>(
-                groupValue: widget.localeTag,
-                onChanged: (value) => Navigator.pop(context, value),
-                child: Column(
-                  children: [
-                    for (final option in _languageOptions(l10n))
-                      RadioListTile<String>(
-                        value: option.$1,
-                        title: Text(option.$2),
-                      ),
-                  ],
+                subtitle: Text(
+                  _languageOptions(l10n)
+                      .firstWhere(
+                        (option) => option.$1 == widget.localeTag,
+                        orElse: () => _languageOptions(l10n).first,
+                      )
+                      .$2,
                 ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.pop(context, '__language__'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.numbers),
+                title: Text(l10n.text('measurementPrecision')),
+                subtitle: Text(
+                  l10n.text('decimalPlacesSummary', {
+                    'count': widget.decimalPlaces,
+                  }),
+                ),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.pop(context, '__precision__'),
               ),
               if (widget.advertising.available) ...[
                 const Divider(height: 1),
@@ -151,8 +197,94 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     if (!mounted || selection == null) return;
     if (selection == '__privacy__') {
       await _showPrivacySettings();
-    } else {
+    } else if (selection == '__language__') {
+      await _showLanguageSettings();
+    } else if (selection == '__precision__') {
+      await _showPrecisionSettings();
+    }
+  }
+
+  Future<void> _showLanguageSettings() async {
+    final selection = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        final l10n = context.l10n;
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.language),
+                title: Text(
+                  l10n.text('language'),
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+              RadioGroup<String>(
+                groupValue: widget.localeTag,
+                onChanged: (value) => Navigator.pop(context, value),
+                child: Column(
+                  children: [
+                    for (final option in _languageOptions(l10n))
+                      RadioListTile<String>(
+                        value: option.$1,
+                        title: Text(option.$2),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    if (selection != null && mounted) {
       await widget.onLocaleChanged(selection);
+    }
+  }
+
+  Future<void> _showPrecisionSettings() async {
+    final selected = await showModalBottomSheet<int>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) {
+        final l10n = context.l10n;
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  l10n.text('measurementPrecision'),
+                  style: Theme.of(context).textTheme.titleMedium
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                Text(l10n.text('measurementPrecisionHint')),
+                const SizedBox(height: 18),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    for (var value = 0; value <= 6; value++)
+                      ChoiceChip(
+                        label: Text('$value'),
+                        selected: value == widget.decimalPlaces,
+                        onSelected: (_) => Navigator.pop(context, value),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+    if (selected != null && mounted) {
+      await widget.onDecimalPlacesChanged(selected);
     }
   }
 
@@ -283,10 +415,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           '${await NativePaths.applicationSupport()}${Platform.pathSeparator}imports',
         );
         await importDirectory.create(recursive: true);
-        final safeName = file.name.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-        path =
-            '${importDirectory.path}${Platform.pathSeparator}'
-            '${DateTime.now().microsecondsSinceEpoch}_$safeName';
+        final uniqueDirectory = await importDirectory.createTemp('document-');
+        var safeName = file.name.replaceAll(RegExp(r'[\\/\x00-\x1f]'), '_');
+        if (safeName.isEmpty || safeName == '.' || safeName == '..') {
+          safeName = 'document';
+        }
+        path = '${uniqueDirectory.path}${Platform.pathSeparator}$safeName';
         final output = File(path).openWrite();
         await for (final chunk in file.xFile.openRead()) {
           output.add(chunk);
@@ -343,16 +477,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         },
       );
       if (!mounted) return;
+      try {
+        final recentFiles = await widget.recentFiles.record(
+          path: path,
+          displayName: document.displayName,
+        );
+        if (mounted) setState(() => _recentFiles = recentFiles);
+      } catch (_) {
+        // Recent files are a convenience; a local persistence failure must
+        // never prevent an otherwise valid drawing from opening.
+      }
+      if (!mounted) return;
       widget.advertising.suspend();
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) =>
-              CadViewerPage(engine: widget.engine, opened: document),
+          builder: (_) => CadViewerPage(
+            engine: widget.engine,
+            opened: document,
+            decimalPlaces: widget.decimalPlaces,
+          ),
         ),
       );
       widget.advertising.resume();
     } catch (error) {
-      if (mounted) setState(() => _error = error.toString());
+      if (mounted) {
+        setState(
+          () => _error = error is CadOpenCancelled ? null : error.toString(),
+        );
+      }
     } finally {
       if (mounted) setState(() => _opening = false);
     }
@@ -383,7 +535,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           children: [
             Icon(Icons.view_in_ar, color: Color(0xff53d4ff)),
             SizedBox(width: 10),
-            Text('CADView', style: TextStyle(fontWeight: FontWeight.w700)),
+            Expanded(
+              child: Text(
+                'CADView',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
           ],
         ),
         actions: [
@@ -403,9 +562,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               Expanded(
                 child: Center(
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 520),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
+                    constraints: const BoxConstraints(maxWidth: 620),
+                    child: ListView(
+                      shrinkWrap: true,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
                       children: [
                         const Icon(
                           Icons.difference_outlined,
@@ -462,6 +622,78 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           Text(
                             l10n.text('viewerEdition'),
                             style: const TextStyle(color: Colors.white38),
+                          ),
+                        ],
+                        if (_recentFiles.isNotEmpty) ...[
+                          const SizedBox(height: 28),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  l10n.text('recentFiles'),
+                                  style: Theme.of(context).textTheme.titleMedium
+                                      ?.copyWith(fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: _opening ? null : _clearRecentFiles,
+                                child: Text(l10n.text('clearRecentFiles')),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          Card(
+                            clipBehavior: Clip.antiAlias,
+                            child: Column(
+                              children: [
+                                for (
+                                  var index = 0;
+                                  index < _recentFiles.length;
+                                  index++
+                                ) ...[
+                                  if (index > 0) const Divider(height: 1),
+                                  ListTile(
+                                    key: ValueKey(
+                                      'recent_file_${_recentFiles[index].path}',
+                                    ),
+                                    enabled: !_opening,
+                                    leading: const Icon(
+                                      Icons.insert_drive_file_outlined,
+                                      color: Color(0xff53d4ff),
+                                    ),
+                                    title: Text(
+                                      _recentFiles[index].displayName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    subtitle: Text(
+                                      _recentFiles[index].path,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                    trailing: IconButton(
+                                      tooltip: l10n.text('removeRecentFile'),
+                                      onPressed: _opening
+                                          ? null
+                                          : () => _removeRecentFile(
+                                              _recentFiles[index].path,
+                                            ),
+                                      icon: const Icon(Icons.close, size: 20),
+                                    ),
+                                    onTap: _opening
+                                        ? null
+                                        : () => _openRecentFile(
+                                            _recentFiles[index],
+                                          ),
+                                    onLongPress: () => showDocumentDetails(
+                                      context,
+                                      _recentFiles[index].displayName,
+                                      _recentFiles[index].path,
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
                           ),
                         ],
                       ],

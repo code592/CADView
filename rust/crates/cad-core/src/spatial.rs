@@ -1,4 +1,4 @@
-use crate::{Bounds2, Scene2D};
+use crate::{Bounds2, Entity2D, Scene2D};
 use rstar::{RTree, RTreeObject, AABB};
 
 #[derive(Debug, Clone, Copy)]
@@ -24,11 +24,21 @@ pub struct SceneIndex2D {
 
 impl SceneIndex2D {
     pub fn build(scene: &Scene2D) -> Self {
+        Self::build_with_bounds(scene, Entity2D::bounds)
+    }
+
+    /// UI-independent hook for envelopes measured by the active text shaper.
+    /// Parsers need no Flutter/font dependency; all other geometry keeps its
+    /// analytic domain bounds.
+    pub fn build_with_bounds(
+        scene: &Scene2D,
+        bounds_for: impl Fn(&Entity2D) -> Option<Bounds2>,
+    ) -> Self {
         let entries = scene
             .entities
             .iter()
             .filter_map(|entity| {
-                entity.bounds().map(|bounds| IndexedEntity {
+                bounds_for(entity).map(|bounds| IndexedEntity {
                     id: entity.id,
                     envelope: to_envelope(bounds),
                 })
@@ -72,6 +82,8 @@ mod tests {
                     id: 1,
                     layer_id: 0,
                     color_argb: 0,
+                    stroke_width: 0.0,
+                    filled: false,
                     geometry: Entity2DGeometry::Line {
                         start: Point2::new(0.0, 0.0),
                         end: Point2::new(10.0, 10.0),
@@ -81,6 +93,8 @@ mod tests {
                     id: 2,
                     layer_id: 0,
                     color_argb: 0,
+                    stroke_width: 0.0,
+                    filled: false,
                     geometry: Entity2DGeometry::Point {
                         position: Point2::new(100.0, 100.0),
                     },

@@ -7,9 +7,9 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `apply_annotation`, `empty_bounds`, `entity_distance`, `entity_kind`, `format_id`, `invalidate_session_viewports`, `load_cached_document`, `move_history`, `open_document_internal`, `point_segment_distance`, `push_ticket_event`, `scene_cache_path`, `scene_kind`, `serialize_session_document`, `set_node_visibility`, `snap_points`, `source_state`, `spatial_candidates`, `write_cached_document`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentSession`, `NativeViewportState`, `OpenTicketState`, `SceneCacheEnvelope`, `TicketSceneSink`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `partial`, `progress`
+// These functions are ignored because they are not marked as `pub`: `angle_on_arc`, `append_nearby_curves`, `apply_annotation`, `build_entity_statistics`, `circle_intersections`, `contains`, `cross`, `curve_intersections`, `distance_to`, `empty_bounds`, `entity_area`, `entity_distance`, `entity_id`, `entity_kind`, `entity_length`, `format_id`, `has_node`, `invalidate_session_viewports`, `load_cached_document`, `move_history`, `nearest_intersection`, `normalized_arc_sweep`, `open_document_internal`, `point_on_circle`, `point_segment_distance`, `push_ticket_event`, `scene_cache_path`, `scene_kind`, `segment_circle_intersections`, `segment_intersection`, `serialize_session_document`, `set_node_visibility`, `snap_points`, `source_state`, `spatial_candidates`, `write_cached_document`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentSession`, `MeasuredTextBounds`, `NativeViewportState`, `OpenTicketState`, `SceneCacheEnvelope`, `SnapCurve`, `TextLayoutItem`, `TicketSceneSink`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `partial`, `progress`
 
 List<FormatInfo> supportedFormats() =>
     RustLib.instance.api.crateApiDocumentSupportedFormats();
@@ -42,6 +42,32 @@ void setApplicationBackgrounded({required bool backgrounded}) => RustLib
 
 Future<String> documentSummary({required BigInt sessionId}) =>
     RustLib.instance.api.crateApiDocumentDocumentSummary(sessionId: sessionId);
+
+/// Bounded text-only pages, never a full drawing transfer. The cursor is a
+/// scene-vector offset, not a text offset (no rescanning earlier geometry).
+Future<String> textLayoutBatch({
+  required BigInt sessionId,
+  required BigInt start,
+}) => RustLib.instance.api.crateApiDocumentTextLayoutBatch(
+  sessionId: sessionId,
+  start: start,
+);
+
+/// Validate the entire packet before mutating a session. Envelopes are runtime
+/// data: never trust a cache produced with different device/source fonts.
+Future<void> applyTextLayoutBounds({
+  required BigInt sessionId,
+  required String packet,
+}) => RustLib.instance.api.crateApiDocumentApplyTextLayoutBounds(
+  sessionId: sessionId,
+  packet: packet,
+);
+
+/// Commit only after every label was measured. Rebuild once, not per packet.
+Future<String> finalizeTextLayout({required BigInt sessionId}) => RustLib
+    .instance
+    .api
+    .crateApiDocumentFinalizeTextLayout(sessionId: sessionId);
 
 Future<String> viewportDocument({
   required BigInt sessionId,
@@ -91,6 +117,14 @@ String setVisibility({
   visible: visible,
 );
 
+String setVisibilities({
+  required BigInt sessionId,
+  required List<VisibilityChange> changes,
+}) => RustLib.instance.api.crateApiDocumentSetVisibilities(
+  sessionId: sessionId,
+  changes: changes,
+);
+
 HitResult? hitTest({
   required BigInt sessionId,
   required double x,
@@ -103,12 +137,37 @@ HitResult? hitTest({
   tolerance: tolerance,
 );
 
+EntityCountSummary? entityCountSummary({
+  required BigInt sessionId,
+  required BigInt entityId,
+}) => RustLib.instance.api.crateApiDocumentEntityCountSummary(
+  sessionId: sessionId,
+  entityId: entityId,
+);
+
 SnapResult? snap({
   required BigInt sessionId,
   required double x,
   required double y,
   required double tolerance,
 }) => RustLib.instance.api.crateApiDocumentSnap(
+  sessionId: sessionId,
+  x: x,
+  y: y,
+  tolerance: tolerance,
+);
+
+/// Finds the nearest geometric intersection within the pick aperture.
+///
+/// This is separate from [`snap`] so tools that explicitly collect a boundary
+/// can prefer a crossing without changing the nearest-snap behaviour used by
+/// distance, coordinate and editing tools.
+SnapResult? snapIntersection({
+  required BigInt sessionId,
+  required double x,
+  required double y,
+  required double tolerance,
+}) => RustLib.instance.api.crateApiDocumentSnapIntersection(
   sessionId: sessionId,
   x: x,
   y: y,
@@ -293,6 +352,53 @@ class DocumentEventInfo {
           progress == other.progress &&
           message == other.message &&
           sessionId == other.sessionId;
+}
+
+class EntityCountSummary {
+  final String entityKind;
+  final BigInt layerId;
+  final BigInt sameKindInLayer;
+  final BigInt sameKindInDocument;
+  final double? sameKindLengthInLayer;
+  final double? sameKindLengthInDocument;
+  final double? sameKindAreaInLayer;
+  final double? sameKindAreaInDocument;
+
+  const EntityCountSummary({
+    required this.entityKind,
+    required this.layerId,
+    required this.sameKindInLayer,
+    required this.sameKindInDocument,
+    this.sameKindLengthInLayer,
+    this.sameKindLengthInDocument,
+    this.sameKindAreaInLayer,
+    this.sameKindAreaInDocument,
+  });
+
+  @override
+  int get hashCode =>
+      entityKind.hashCode ^
+      layerId.hashCode ^
+      sameKindInLayer.hashCode ^
+      sameKindInDocument.hashCode ^
+      sameKindLengthInLayer.hashCode ^
+      sameKindLengthInDocument.hashCode ^
+      sameKindAreaInLayer.hashCode ^
+      sameKindAreaInDocument.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is EntityCountSummary &&
+          runtimeType == other.runtimeType &&
+          entityKind == other.entityKind &&
+          layerId == other.layerId &&
+          sameKindInLayer == other.sameKindInLayer &&
+          sameKindInDocument == other.sameKindInDocument &&
+          sameKindLengthInLayer == other.sameKindLengthInLayer &&
+          sameKindLengthInDocument == other.sameKindLengthInDocument &&
+          sameKindAreaInLayer == other.sameKindAreaInLayer &&
+          sameKindAreaInDocument == other.sameKindAreaInDocument;
 }
 
 class FormatInfo {
@@ -508,4 +614,22 @@ class ViewportInfo {
           width == other.width &&
           height == other.height &&
           pixelRatio == other.pixelRatio;
+}
+
+class VisibilityChange {
+  final BigInt itemId;
+  final bool visible;
+
+  const VisibilityChange({required this.itemId, required this.visible});
+
+  @override
+  int get hashCode => itemId.hashCode ^ visible.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is VisibilityChange &&
+          runtimeType == other.runtimeType &&
+          itemId == other.itemId &&
+          visible == other.visible;
 }
