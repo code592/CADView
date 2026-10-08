@@ -86,60 +86,70 @@ pub enum Entity2DGeometry {
         start_angle: f64,
         end_angle: f64,
     },
-    Text {
-        origin: Point2,
-        value: String,
-        height: f64,
-        /// CAD TEXT/MTEXT uses capital height; SVG font-size uses em height.
-        #[serde(default)]
-        height_reference: TextHeightReference2D,
-        rotation: f64,
-        /// CAD width factor. Kept separate from font size so fitted title-block
-        /// labels retain their intended proportions.
-        #[serde(default = "default_text_width_factor")]
-        width_factor: f64,
-        #[serde(default)]
-        oblique_angle: f64,
-        #[serde(default)]
-        horizontal_alignment: TextHorizontalAlignment2D,
-        #[serde(default)]
-        vertical_alignment: TextVerticalAlignment2D,
-        /// Width between the two TEXT alignment points for Aligned/Fit text.
-        #[serde(default)]
-        target_width: Option<f64>,
-        /// Aligned TEXT scales height with width; Fit TEXT keeps height fixed.
-        #[serde(default)]
-        uniform_fit: bool,
-        /// MTEXT paragraph width in drawing units, separate from TEXT fitting.
-        #[serde(default)]
-        wrap_width: Option<f64>,
-        /// MTEXT group 44 factor and group 73 policy, separate from font height.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        line_spacing: Option<MTextLineSpacing2D>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        columns: Option<MTextColumns2D>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        background: Option<MTextBackground2D>,
-        #[serde(default)]
-        mirrored_x: bool,
-        #[serde(default)]
-        mirrored_y: bool,
-        /// A licensed bundled family or an installed TrueType family. SHX file
-        /// names are intentionally not exposed as font-family names.
-        #[serde(default)]
-        font_family: Option<String>,
-        /// SHX font files of the source text style. They are not
-        /// redistributable; the renderer uses them to emulate SHX proportions
-        /// with bundled substitute fonts.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        shx: Option<ShxFonts2D>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        plane: Option<TextPlane2D>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        text_runs: Vec<TextRun2D>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        text_warnings: Vec<String>,
-    },
+    /// Boxed so the many lines, arcs and points of a drawing do not each
+    /// reserve room for text fields. Serialized exactly as an inline
+    /// variant (`{"kind": "text", ...}`).
+    Text(Box<TextGeometry2D>),
+}
+
+/// TEXT/MTEXT geometry of [Entity2DGeometry::Text].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextGeometry2D {
+    pub origin: Point2,
+    pub value: String,
+    pub height: f64,
+    /// CAD TEXT/MTEXT uses capital height; SVG font-size uses em height.
+    #[serde(default)]
+    pub height_reference: TextHeightReference2D,
+    pub rotation: f64,
+    /// CAD width factor. Kept separate from font size so fitted title-block
+    /// labels retain their intended proportions.
+    #[serde(default = "default_text_width_factor")]
+    pub width_factor: f64,
+    #[serde(default)]
+    pub oblique_angle: f64,
+    #[serde(default)]
+    pub horizontal_alignment: TextHorizontalAlignment2D,
+    #[serde(default)]
+    pub vertical_alignment: TextVerticalAlignment2D,
+    /// Width between the two TEXT alignment points for Aligned/Fit text.
+    #[serde(default)]
+    pub target_width: Option<f64>,
+    /// Aligned TEXT scales height with width; Fit TEXT keeps height fixed.
+    #[serde(default)]
+    pub uniform_fit: bool,
+    /// MTEXT paragraph width in drawing units, separate from TEXT fitting.
+    #[serde(default)]
+    pub wrap_width: Option<f64>,
+    /// MTEXT group 44 factor and group 73 policy, separate from font height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_spacing: Option<MTextLineSpacing2D>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Keep large, optional text decorations out of EVERY line/point's
+    // enum storage. Box is serde-transparent: scene/cache/bridge schemas
+    // and text metrics do not change.
+    pub columns: Option<Box<MTextColumns2D>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<Box<MTextBackground2D>>,
+    #[serde(default)]
+    pub mirrored_x: bool,
+    #[serde(default)]
+    pub mirrored_y: bool,
+    /// A licensed bundled family or an installed TrueType family. SHX file
+    /// names are intentionally not exposed as font-family names.
+    #[serde(default)]
+    pub font_family: Option<String>,
+    /// SHX font files of the source text style. They are not
+    /// redistributable; the renderer uses them to emulate SHX proportions
+    /// with bundled substitute fonts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shx: Option<Box<ShxFonts2D>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plane: Option<TextPlane2D>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_runs: Vec<TextRun2D>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub text_warnings: Vec<String>,
 }
 
 /// Lowercase SHX file names (primary and big font) of a CAD text style.
@@ -303,27 +313,28 @@ impl Entity2D {
                 min: Point2::new(center.x - radius, center.y - radius),
                 max: Point2::new(center.x + radius, center.y + radius),
             }),
-            Text {
-                origin,
-                height,
-                value,
-                width_factor,
-                target_width,
-                uniform_fit,
-                wrap_width,
-                line_spacing,
-                columns,
-                background,
-                horizontal_alignment,
-                vertical_alignment,
-                rotation,
-                oblique_angle,
-                mirrored_x,
-                mirrored_y,
-                plane,
-                text_runs,
-                ..
-            } => {
+            Text(text) => {
+                let TextGeometry2D {
+                    origin,
+                    height,
+                    value,
+                    width_factor,
+                    target_width,
+                    uniform_fit,
+                    wrap_width,
+                    line_spacing,
+                    columns,
+                    background,
+                    horizontal_alignment,
+                    vertical_alignment,
+                    rotation,
+                    oblique_angle,
+                    mirrored_x,
+                    mirrored_y,
+                    plane,
+                    text_runs,
+                    ..
+                } = &**text;
                 let height = height.abs()
                     * text_runs
                         .iter()
@@ -417,9 +428,9 @@ impl Entity2D {
                 };
                 let mirror_x = if *mirrored_x { -1.0 } else { 1.0 };
                 let mirror_y = if *mirrored_y { -1.0 } else { 1.0 };
-                let padding = background.map_or(height, |background| {
+                let padding = background.as_deref().map_or(height, |background| {
                     if background.layout_supported {
-                        height.max(self.text_background_margin(background))
+                        height.max(self.text_background_margin(*background))
                     } else {
                         height
                     }
@@ -445,10 +456,10 @@ impl Entity2D {
 
     fn text_background_margin(&self, background: MTextBackground2D) -> f64 {
         match &self.geometry {
-            Entity2DGeometry::Text { height, .. }
+            Entity2DGeometry::Text(text)
                 if background.scale.is_finite() && (1.0..=5.0).contains(&background.scale) =>
             {
-                height.abs() * (background.scale - 1.0)
+                text.height.abs() * (background.scale - 1.0)
             }
             _ => 0.0,
         }
@@ -603,7 +614,7 @@ mod text_bounds_tests {
             stroke_width: 0.0,
             filled: false,
             dash: Vec::new(),
-            geometry: Entity2DGeometry::Text {
+            geometry: Entity2DGeometry::Text(Box::new(TextGeometry2D {
                 origin: Point2::new(105.0, 0.0),
                 value: "中文\nالعربية\n⌀ 120".into(),
                 height: 20.0,
@@ -626,7 +637,7 @@ mod text_bounds_tests {
                 text_runs: Vec::new(),
                 text_warnings: Vec::new(),
                 plane: None,
-            },
+            })),
         };
         let bounds = entity.bounds().unwrap();
         assert!(bounds.min.x < 100.0);
@@ -649,8 +660,9 @@ mod text_bounds_tests {
         };
         assert!(index.query(border).is_empty());
         let mut decorated = scene.entities[0].clone();
-        if let Entity2DGeometry::Text { background, .. } = &mut decorated.geometry {
-            *background = Some(MTextBackground2D {
+        if let Entity2DGeometry::Text(text_geometry) = &mut decorated.geometry {
+            let TextGeometry2D { background, .. } = &mut **text_geometry;
+            *background = Some(Box::new(MTextBackground2D {
                 layout_supported: true,
                 fill: true,
                 frame: false,
@@ -658,7 +670,7 @@ mod text_bounds_tests {
                 color_mode: MTextBackgroundColor2D::Canvas,
                 color_argb: 0,
                 transparency: 0,
-            });
+            }));
         }
         let masked_index = SceneIndex2D::build(&Scene2D {
             entities: vec![decorated],

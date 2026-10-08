@@ -1,5 +1,6 @@
 //! A font cannot repair text already decoded with the wrong code page.
 //! Keep this isolated audit separate from rendering/font asset checks.
+use cad_core::TextGeometry2D;
 use cad_core::{CancellationToken, Entity2DGeometry, FormatAdapter, SceneDocument};
 use cad_formats::DxfAdapter;
 
@@ -16,9 +17,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let SceneDocument::TwoD(scene) = opened.scene else {
         return Err("expected Scene2D".into());
     };
-    let Entity2DGeometry::Text { value, .. } = &scene.entities[0].geometry else {
+    let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
         return Err("expected text".into());
     };
+    let TextGeometry2D { value, .. } = &**text_geometry;
     println!("Expected: Размер; decoded: {value}");
     if value != "Размер" {
         return Err("legacy DXF text code page is not honored".into());
@@ -61,9 +63,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let SceneDocument::TwoD(scene) = opened.scene else {
         return Err("expected Scene2D".into());
     };
-    let Entity2DGeometry::Text { value, .. } = &scene.entities[0].geometry else {
+    let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
         return Err("expected text".into());
     };
+    let TextGeometry2D { value, .. } = &**text_geometry;
     println!("Binary UTF-8 expected: Размер 中文; decoded: {value}");
     if value != "Размер 中文" {
         return Err("binary DXF text decoding is incorrect".into());

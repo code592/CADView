@@ -10,6 +10,7 @@ import 'package:cad_view/core/cad_font_metrics.dart';
 import 'package:cad_view/core/image_export.dart';
 import 'package:cad_view/features/viewer/cad_document_model.dart';
 import 'package:cad_view/features/viewer/cad_scene_painter.dart';
+import 'package:cad_view/features/viewer/cad_viewer_page.dart';
 import 'package:cad_view/features/viewer/pdf_document_viewport.dart';
 import 'package:cad_view/l10n/app_localizations.dart';
 import 'package:cad_view/src/rust/api/document.dart' as native;
@@ -22,6 +23,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
 import '../test/support/multilingual_fixture.dart';
+import '../test/support/mesh_culling_fixture.dart';
 
 void main() {
   final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -30,6 +32,13 @@ void main() {
     'images': <String, String>{},
   };
   binding.reportData = report;
+
+  testWidgets('mesh culling preserves offscreen crossings and resized views', (
+    tester,
+  ) async {
+    report['meshCullingPixelChecks'] = await verifyMeshViewportCulling();
+    expect(report['meshCullingPixelChecks'], 56);
+  });
 
   testWidgets('mobile asset fonts render offline without Ahem replacement', (
     tester,
@@ -321,6 +330,102 @@ void main() {
       await directory.delete(recursive: true);
     }
   });
+
+  testWidgets(
+    'dense crossings and precision touch use the real native bridge',
+    (tester) async {
+      final engine = NativeCadEngine()..setApplicationBackgrounded(false);
+      final directory = await Directory.systemTemp.createTemp(
+        'cadview-picking-',
+      );
+      final source = StringBuffer('0\nSECTION\n2\nENTITIES\n');
+      void line(double x1, double y1, double x2, double y2) =>
+          source.write('0\nLINE\n8\n0\n10\n$x1\n20\n$y1\n11\n$x2\n21\n$y2\n');
+      for (var i = 0; i < 600; i++) {
+        line(-2, 0.01 + i / 10000, 2, 0.01 + i / 10000);
+      }
+      line(0.7, -2, 0.7, 2);
+      source.write('0\nENDSEC\n0\nEOF\n');
+      final file = await File('${directory.path}/dense.dxf')
+          .writeAsString(source.toString());
+      final opened = await engine.openDocument(file.path);
+      try {
+        final hit = await engine.snapIntersection(opened.sessionId, 0, 0, 1);
+        expect(hit, isNotNull);
+        expect(hit!.position.dx, closeTo(0.7, 1e-10));
+        expect(hit.position.dy, closeTo(0.01, 1e-10));
+        await tester.pumpWidget(
+          MaterialApp(
+            locale: const Locale('en'),
+            supportedLocales: AppLocalizations.supportedLocales,
+            localizationsDelegates: const [
+              AppLocalizations.delegate,
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            home: CadViewerPage(engine: engine, opened: opened),
+          ),
+        );
+        await tester.pumpAndSettle();
+        final paintFinder = find.byWidgetPredicate(
+          (widget) =>
+              widget is CustomPaint && widget.painter is CadScenePainter,
+        );
+        await tester.tapAt(tester.getCenter(paintFinder));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Measure'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Distance'));
+        await tester.pumpAndSettle();
+        final painter =
+            tester.widget<CustomPaint>(paintFinder).painter as CadScenePainter;
+        final transform = CadViewTransform.forScene(
+          painter.document,
+          tester.getSize(paintFinder),
+          painter.zoom,
+          painter.pan,
+        );
+        final target =
+            tester.getTopLeft(paintFinder) +
+            transform.worldToScreen(const Offset(0.7, 0.01));
+        final gesture = await tester.startGesture(target);
+        await tester.pump(const Duration(milliseconds: 600));
+        expect(
+          find.byKey(const ValueKey('measurement_precision_loupe')),
+          findsOneWidget,
+        );
+        await gesture.up();
+        // Real bridge completion can arrive after the first settled frame.
+        for (var i = 0; i < 100; i++) {
+          await tester.pump(const Duration(milliseconds: 20));
+          final current =
+              tester.widget<CustomPaint>(paintFinder).painter
+                  as CadScenePainter;
+          if (current.measurementPoints.isNotEmpty) break;
+        }
+        final current =
+            tester.widget<CustomPaint>(paintFinder).painter as CadScenePainter;
+        expect(current.measurementPoints, hasLength(1));
+        expect(current.measurementPoints.single.dx, closeTo(0.7, 1e-9));
+        expect(current.measurementPoints.single.dy, closeTo(0.01, 1e-9));
+        expect(find.byTooltip('Undo last point'), findsOneWidget);
+        await tester.tap(find.byTooltip('Clear measurement'));
+        await tester.pumpAndSettle();
+        expect(
+          (tester.widget<CustomPaint>(paintFinder).painter as CadScenePainter)
+              .measurementPoints,
+          isEmpty,
+        );
+        expect(tester.takeException(), isNull);
+        report['denseNativePrecisionPick'] = 'passed';
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        await engine.closeDocument(opened.sessionId);
+        await directory.delete(recursive: true);
+      }
+    },
+  );
 
   testWidgets('native binary DXF preserves Unicode and legacy code pages', (
     tester,

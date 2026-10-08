@@ -131,6 +131,371 @@ pub(crate) fn scan(
     spline_fit_data: bool,
     cancel: &CancellationToken,
 ) -> Result<RawScan, CadError> {
+    match scan_text(bytes, encoding, spline_fit_data, cancel) {
+        Some(result) => result,
+        None => scan_pairs(bytes, encoding, spline_fit_data, cancel),
+    }
+}
+
+fn finish_collected(
+    result: &mut RawScan,
+    kind: &str,
+    pairs: &[CodePair],
+    owner: &Option<String>,
+    spline_fit_data: bool,
+) {
+    match kind {
+        "HATCH" => match parse_hatch(pairs, spline_fit_data) {
+            Some(parsed) => result
+                .hatches
+                .entry(owner.clone())
+                .or_default()
+                .push(parsed),
+            None => result.unreadable_hatches += 1,
+        },
+        "ACAD_TABLE" => match parse_table(pairs) {
+            Some(parsed) => result.tables.entry(owner.clone()).or_default().push(parsed),
+            None => *result.discarded.entry("ACAD_TABLE".to_owned()).or_default() += 1,
+        },
+        _ => match parse_mleader(pairs) {
+            Some(parsed) => result
+                .mleaders
+                .entry(owner.clone())
+                .or_default()
+                .push(parsed),
+            None => result.unreadable_mleaders += 1,
+        },
+    }
+}
+
+/// One group of a text DXF: the code line and the value line (both without
+/// their line ending) and the byte range of the whole group.
+pub(crate) struct TextPair<'a> {
+    pub code: &'a [u8],
+    pub value: &'a [u8],
+    pub start: usize,
+    pub end: usize,
+}
+
+pub(crate) enum TextStep<'a> {
+    Pair(TextPair<'a>),
+    /// Where the `dxf` reader stops: end of input or an empty code line.
+    End,
+    /// Input this byte-level reader does not mirror exactly; callers use the
+    /// `dxf` reader instead.
+    Unsupported,
+}
+
+/// Group splitter over a text DXF held in memory. It follows the `dxf`
+/// reader's line rules (LF or CRLF, a BOM before any code line, trimmed
+/// codes) without decoding or copying values, so passes that only need a
+/// few groups can skip the rest cheaply.
+pub(crate) struct TextPairs<'a> {
+    bytes: &'a [u8],
+    position: usize,
+}
+
+impl<'a> TextPairs<'a> {
+    /// None for binary DXF and DXB, which have their own readers.
+    pub(crate) fn new(bytes: &'a [u8]) -> Option<Self> {
+        if bytes.starts_with(b"AutoCAD Binary DXF") || bytes.starts_with(b"AutoCAD DXB") {
+            return None;
+        }
+        Some(Self { bytes, position: 0 })
+    }
+
+    fn line(&mut self) -> Option<&'a [u8]> {
+        if self.position >= self.bytes.len() {
+            return None;
+        }
+        let rest = &self.bytes[self.position..];
+        let (line, advance) = match rest.iter().position(|byte| *byte == b'\n') {
+            Some(length) => (&rest[..length], length + 1),
+            None => (rest, rest.len()),
+        };
+        self.position += advance;
+        Some(line.strip_suffix(b"\r").unwrap_or(line))
+    }
+
+    pub(crate) fn next_pair(&mut self) -> TextStep<'a> {
+        let start = self.position;
+        let Some(code) = self.line() else {
+            return TextStep::End;
+        };
+        let code = code
+            .strip_prefix(b"\xEF\xBB\xBF")
+            .unwrap_or(code)
+            .trim_ascii();
+        if code.is_empty() {
+            return TextStep::End;
+        }
+        if !code
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || *byte == b'-')
+        {
+            return TextStep::Unsupported;
+        }
+        let Some(value) = self.line() else {
+            return TextStep::Unsupported;
+        };
+        TextStep::Pair(TextPair {
+            code,
+            value,
+            start,
+            end: self.position,
+        })
+    }
+}
+
+impl<'a> TextPair<'a> {
+    pub(crate) fn code(&self) -> Option<i32> {
+        std::str::from_utf8(self.code).ok()?.parse().ok()
+    }
+
+    /// The string value exactly as the `dxf` reader decodes it. Plain ASCII
+    /// without `\U+` or caret escapes is returned as is; anything else is
+    /// decoded by the reader itself from the group's bytes in [source].
+    pub(crate) fn string(
+        &self,
+        source: &'a [u8],
+        encoding: &'static encoding_rs::Encoding,
+    ) -> Option<std::borrow::Cow<'a, str>> {
+        if encoding.is_ascii_compatible()
+            && self.value.is_ascii()
+            && !self.value.iter().any(|byte| matches!(byte, b'\\' | b'^'))
+        {
+            return Some(std::borrow::Cow::Borrowed(
+                std::str::from_utf8(self.value).ok()?,
+            ));
+        }
+        match typed_pairs(&source[self.start..self.end], encoding)?
+            .into_iter()
+            .next()?
+            .value
+        {
+            CodePairValue::Str(value) => Some(std::borrow::Cow::Owned(value)),
+            _ => None,
+        }
+    }
+}
+
+/// Typed pairs of a run of complete text groups, read by the `dxf` reader.
+fn typed_pairs(bytes: &[u8], encoding: &'static encoding_rs::Encoding) -> Option<Vec<CodePair>> {
+    if bytes.is_empty() {
+        return Some(Vec::new());
+    }
+    Drawing::raw_code_pairs(&mut Cursor::new(bytes), encoding)
+        .ok()?
+        .collect::<Result<Vec<_>, _>>()
+        .ok()
+}
+
+/// The text fast path of [scan]: groups are only decoded at section and
+/// entity boundaries and inside the HATCH/ACAD_TABLE/MULTILEADER entities
+/// that are collected, which the `dxf` reader then parses exactly as before.
+/// None hands the whole input to [scan_pairs].
+pub(crate) fn scan_text(
+    bytes: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+    spline_fit_data: bool,
+    cancel: &CancellationToken,
+) -> Option<Result<RawScan, CadError>> {
+    if !encoding.is_ascii_compatible() {
+        return None;
+    }
+    let mut groups = TextPairs::new(bytes)?;
+    let mut result = RawScan::default();
+    let mut section: Option<String> = None;
+    let mut expect_section = false;
+    let mut block: Option<String> = None;
+    let mut expect_block = false;
+    // (entity type, byte offset of its first pair after the type).
+    let mut collected: Option<(&'static str, usize)> = None;
+    let mut owner: Option<String> = None;
+    let mut index = 0usize;
+    loop {
+        if index % 65_536 == 0 {
+            if let Err(error) = cancel.check() {
+                return Some(Err(error));
+            }
+        }
+        index += 1;
+        let pair = match groups.next_pair() {
+            TextStep::Pair(pair) => pair,
+            TextStep::End => break,
+            TextStep::Unsupported => return None,
+        };
+        let code = pair.code()?;
+        if code == 0 {
+            if let Some((kind, start)) = collected.take() {
+                let pairs = typed_pairs(&bytes[start..pair.start], encoding)?;
+                finish_collected(&mut result, kind, &pairs, &owner, spline_fit_data);
+            }
+            let value = pair.string(bytes, encoding)?;
+            match value.as_ref() {
+                "SECTION" => expect_section = true,
+                "ENDSEC" => {
+                    section = None;
+                    block = None;
+                }
+                "BLOCK" => expect_block = true,
+                "ENDBLK" => block = None,
+                "EOF" => break,
+                kind => {
+                    let in_entities = section.as_deref() == Some("ENTITIES");
+                    let in_block = section.as_deref() == Some("BLOCKS") && block.is_some();
+                    if !(in_entities || in_block) {
+                        continue;
+                    }
+                    let raw_kind = match kind {
+                        "HATCH" => Some("HATCH"),
+                        "ACAD_TABLE" => Some("ACAD_TABLE"),
+                        "MULTILEADER" | "MLEADER" => Some("MULTILEADER"),
+                        _ => None,
+                    };
+                    if let Some(raw_kind) = raw_kind {
+                        owner = if in_entities { None } else { block.clone() };
+                        collected = Some((raw_kind, pair.end));
+                    } else if !MODELED.contains(&kind) {
+                        *result.discarded.entry(kind.to_owned()).or_default() += 1;
+                    }
+                }
+            }
+            continue;
+        }
+        if expect_section && code == 2 {
+            section = Some(pair.string(bytes, encoding)?.into_owned());
+            expect_section = false;
+        } else if expect_block && code == 2 {
+            block = Some(pair.string(bytes, encoding)?.to_uppercase());
+            expect_block = false;
+        }
+    }
+    Some(Ok(result))
+}
+
+/// Layout of a text DXF found by [entity_sections].
+#[derive(Debug, Default)]
+pub(crate) struct EntitySections {
+    /// Each ENTITIES section, from its SECTION group through ENDSEC.
+    pub ranges: Vec<std::ops::Range<usize>>,
+    /// Number of type groups inside them: an upper bound of the entities
+    /// the `dxf` reader assembles from them (it folds VERTEX, SEQEND and
+    /// ATTRIB groups into their owners).
+    pub estimate: usize,
+    /// The HEADER section, from its SECTION group through ENDSEC.
+    pub header: Option<std::ops::Range<usize>>,
+    /// The entity groups of the only ENTITIES section (after its name,
+    /// before ENDSEC), when HEADER, TABLES and BLOCKS all precede it.
+    pub body: Option<std::ops::Range<usize>>,
+    /// Offsets in [body] where a top-level entity starts (never inside a
+    /// POLYLINE or an INSERT's attributes), about every [SPLIT_SPACING]
+    /// bytes, for reading the body in parallel.
+    pub splits: Vec<usize>,
+}
+
+const SPLIT_SPACING: usize = 256 * 1024;
+
+/// Finds the ENTITIES sections of a text DXF and where its entities can be
+/// split. None when the input is not a text DXF this splitter reads exactly.
+pub(crate) fn entity_sections(
+    bytes: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+    cancel: &CancellationToken,
+) -> Option<Result<EntitySections, CadError>> {
+    if !encoding.is_ascii_compatible() {
+        return None;
+    }
+    let mut groups = TextPairs::new(bytes)?;
+    let mut result = EntitySections::default();
+    let mut section_start: Option<usize> = None;
+    let mut section: Option<String> = None;
+    let mut entities_start: Option<usize> = None;
+    let mut body_start = 0;
+    let mut body: Option<std::ops::Range<usize>> = None;
+    let mut header_start: Option<usize> = None;
+    let mut canonical = true;
+    let mut index = 0usize;
+    loop {
+        if index % 65_536 == 0 {
+            if let Err(error) = cancel.check() {
+                return Some(Err(error));
+            }
+        }
+        index += 1;
+        let pair = match groups.next_pair() {
+            TextStep::Pair(pair) => pair,
+            TextStep::End => break,
+            TextStep::Unsupported => return None,
+        };
+        let code = pair.code()?;
+        if let Some(start) = section_start.take() {
+            if code == 2 {
+                let name = pair.string(bytes, encoding)?.into_owned();
+                if matches!(name.as_str(), "HEADER" | "TABLES" | "BLOCKS")
+                    && !result.ranges.is_empty()
+                {
+                    canonical = false;
+                }
+                if name == "ENTITIES" {
+                    entities_start = Some(start);
+                    body_start = pair.end;
+                } else if name == "HEADER" && result.header.is_none() {
+                    header_start = Some(start);
+                }
+                section = Some(name);
+                continue;
+            }
+        }
+        if code != 0 {
+            continue;
+        }
+        let value = pair.string(bytes, encoding)?;
+        match value.as_ref() {
+            "SECTION" => section_start = Some(pair.start),
+            "ENDSEC" => {
+                if let Some(start) = entities_start.take() {
+                    result.ranges.push(start..pair.end);
+                    body = Some(body_start..pair.start);
+                }
+                if section.as_deref() == Some("HEADER") {
+                    if let Some(start) = header_start.take() {
+                        result.header = Some(start..pair.end);
+                    }
+                }
+                section = None;
+            }
+            "EOF" => break,
+            "VERTEX" | "SEQEND" | "ATTRIB" => {}
+            _ => {
+                if entities_start.is_some() {
+                    result.estimate += 1;
+                    let last = result.splits.last().copied().unwrap_or(body_start);
+                    if pair.start >= last + SPLIT_SPACING {
+                        result.splits.push(pair.start);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(start) = entities_start {
+        result.ranges.push(start..bytes.len());
+        canonical = false;
+    }
+    if canonical && result.ranges.len() == 1 && header_start.is_none() {
+        result.body = body;
+    } else {
+        result.splits.clear();
+    }
+    Some(Ok(result))
+}
+
+pub(crate) fn scan_pairs(
+    bytes: &[u8],
+    encoding: &'static encoding_rs::Encoding,
+    spline_fit_data: bool,
+    cancel: &CancellationToken,
+) -> Result<RawScan, CadError> {
     let mut result = RawScan::default();
     let pairs = Drawing::raw_code_pairs(&mut Cursor::new(bytes), encoding)
         .map_err(|error| CadError::InvalidDocument(format!("DXF parse failed: {error}")))?;
@@ -149,28 +514,8 @@ pub(crate) fn scan(
         // succeeded; keep everything gathered so far.
         let Ok(pair) = pair else { break };
         if pair.code == 0 {
-            match collected.take() {
-                Some(("HATCH", pairs)) => match parse_hatch(&pairs, spline_fit_data) {
-                    Some(parsed) => result
-                        .hatches
-                        .entry(owner.clone())
-                        .or_default()
-                        .push(parsed),
-                    None => result.unreadable_hatches += 1,
-                },
-                Some(("ACAD_TABLE", pairs)) => match parse_table(&pairs) {
-                    Some(parsed) => result.tables.entry(owner.clone()).or_default().push(parsed),
-                    None => *result.discarded.entry("ACAD_TABLE".to_owned()).or_default() += 1,
-                },
-                Some((_, pairs)) => match parse_mleader(&pairs) {
-                    Some(parsed) => result
-                        .mleaders
-                        .entry(owner.clone())
-                        .or_default()
-                        .push(parsed),
-                    None => result.unreadable_mleaders += 1,
-                },
-                None => {}
+            if let Some((kind, pairs)) = collected.take() {
+                finish_collected(&mut result, kind, &pairs, &owner, spline_fit_data);
             }
             let CodePairValue::Str(value) = &pair.value else {
                 continue;

@@ -22,8 +22,9 @@ use crate::types::{Color, DxfVersion, Transparency, Vector2, Vector3};
 /// - `bit_shift`: Current bit offset within the current byte (0–7)
 /// - `last_byte`: The most recently read byte from the stream
 pub struct DwgBitReader {
-    /// Source data buffer.
-    data: Vec<u8>,
+    /// Source data buffer, shared by the readers of one object record
+    /// (CADView patch: they used to copy it each).
+    data: std::sync::Arc<[u8]>,
     /// Current stream byte position (points past the last byte read via advance_byte).
     position: usize,
     /// Current bit offset within `last_byte` (0 = no bits consumed yet from last_byte)
@@ -46,6 +47,15 @@ pub struct DwgBitReader {
 impl DwgBitReader {
     /// Create a new bit reader over the given data buffer.
     pub fn new(data: Vec<u8>, version: DwgVersion, dxf_version: DxfVersion) -> Self {
+        Self::shared(data.into(), version, dxf_version)
+    }
+
+    /// Create a bit reader over a buffer shared with other readers.
+    pub fn shared(
+        data: std::sync::Arc<[u8]>,
+        version: DwgVersion,
+        dxf_version: DxfVersion,
+    ) -> Self {
         Self {
             data,
             position: 0,
@@ -113,7 +123,7 @@ impl DwgBitReader {
     /// Used to extract the raw merged-stream record bytes for
     /// round-trip preservation of unknown entities.
     pub fn data_bytes(&self) -> Vec<u8> {
-        self.data.clone()
+        self.data.to_vec()
     }
 
     /// Set the stream position (byte-level) and reset bit shift.

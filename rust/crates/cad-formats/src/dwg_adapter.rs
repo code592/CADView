@@ -19,6 +19,7 @@ use acadrust::{
     types::{Matrix3, Matrix4, Transform},
     CadDocument, Color as AcadColor, DwgReader, Handle, Vector3,
 };
+use cad_core::TextGeometry2D;
 use cad_core::{
     fingerprint, fingerprint_path, CadError, CancellationToken, DiagnosticSeverity,
     DocumentMetadata, Entity2D, Entity2DGeometry, FormatAdapter, FormatCapabilities,
@@ -633,7 +634,8 @@ impl DwgNormalizer<'_> {
                         * insert_grid_offset(original_insert, cell);
                     let offset = text_frame.apply_rotation(grid);
                     let mut instance = geometry.clone();
-                    if let Entity2DGeometry::Text { origin, .. } = &mut instance {
+                    if let Entity2DGeometry::Text(text_geometry) = &mut instance {
+                        let TextGeometry2D { origin, .. } = &mut **text_geometry;
                         origin.x += offset.x;
                         origin.y += offset.y;
                     }
@@ -928,11 +930,10 @@ impl DwgNormalizer<'_> {
         }
         let layer_id = *self.layer_ids.get(&common.layer).unwrap_or(&1);
         let layer_color = *self.layer_colors.get(&common.layer).unwrap_or(&0xffe5e7eb);
-        if let Entity2DGeometry::Text {
-            background: Some(background),
-            ..
-        } = &mut geometry
-        {
+        if let Some(background) = match &mut geometry {
+            Entity2DGeometry::Text(text) => text.background.as_mut(),
+            _ => None,
+        } {
             use cad_core::MTextBackgroundColor2D as B;
             match background.color_mode {
                 B::ByLayer => {
@@ -983,7 +984,7 @@ impl DwgNormalizer<'_> {
             dash: if filled
                 || matches!(
                     geometry,
-                    Entity2DGeometry::Text { .. } | Entity2DGeometry::Point { .. }
+                    Entity2DGeometry::Text(_) | Entity2DGeometry::Point { .. }
                 ) {
                 Vec::new()
             } else {
@@ -1041,15 +1042,16 @@ fn geometry_is_finite(geometry: &Entity2DGeometry) -> bool {
         | Entity2DGeometry::Arc { center, radius, .. } => {
             point_is_finite(center) && radius.is_finite() && *radius > 0.0
         }
-        Entity2DGeometry::Text {
-            origin,
-            height,
-            rotation,
-            width_factor,
-            oblique_angle,
-            plane,
-            ..
-        } => {
+        Entity2DGeometry::Text(text_geometry) => {
+            let TextGeometry2D {
+                origin,
+                height,
+                rotation,
+                width_factor,
+                oblique_angle,
+                plane,
+                ..
+            } = &**text_geometry;
             point_is_finite(origin)
                 && height.is_finite()
                 && rotation.is_finite()
@@ -1156,14 +1158,14 @@ fn normalize_attribute(
         parsed
             .warnings
             .push("Embedded multiline attribute layout is unavailable".to_owned());
-        if let Entity2DGeometry::Text {
-            value,
-            text_runs,
-            text_warnings,
-            line_spacing,
-            ..
-        } = &mut geometry
-        {
+        if let Entity2DGeometry::Text(text_geometry) = &mut geometry {
+            let TextGeometry2D {
+                value,
+                text_runs,
+                text_warnings,
+                line_spacing,
+                ..
+            } = &mut **text_geometry;
             *value = parsed.value;
             *text_runs = parsed.runs;
             *text_warnings = parsed.warnings;
@@ -1298,7 +1300,7 @@ fn normalize_entity_in_frame(
                 (value.rotation, None)
             };
             let origin = text_frame.apply(axes_point(axes, origin));
-            Some(Entity2DGeometry::Text {
+            Some(Entity2DGeometry::Text(Box::new(TextGeometry2D {
                 origin: point(origin.x, origin.y),
                 value: parsed.value,
                 height: value.height.abs(),
@@ -1344,11 +1346,11 @@ fn normalize_entity_in_frame(
                 mirrored_x: value.generation_flags & 2 != 0,
                 mirrored_y: value.generation_flags & 4 != 0,
                 font_family: text_font_family(drawing, &value.style),
-                shx: text_shx_fonts(drawing, &value.style),
+                shx: text_shx_fonts(drawing, &value.style).map(Box::new),
                 plane: plane(transformed_axes(axes, text_frame)),
                 text_runs: parsed.runs,
                 text_warnings: parsed.warnings,
-            })
+            })))
         }
         AcadEntity::MText(value) => {
             let direction = value
@@ -1447,7 +1449,7 @@ fn normalize_entity_in_frame(
                     TextVerticalAlignment2D::Bottom,
                 ),
             };
-            Some(Entity2DGeometry::Text {
+            Some(Entity2DGeometry::Text(Box::new(TextGeometry2D {
                 origin: point(origin.x, origin.y),
                 value: parsed.value,
                 height: value.height.abs(),
@@ -1468,12 +1470,12 @@ fn normalize_entity_in_frame(
                         .then_some(value.rectangle_width)
                 }),
                 line_spacing: Some(line_spacing),
-                columns,
-                background,
+                columns: columns.map(Box::new),
+                background: background.map(Box::new),
                 mirrored_x: style_mirrored_x(drawing, &value.style),
                 mirrored_y: style_mirrored_y(drawing, &value.style),
                 font_family: text_font_family(drawing, &value.style),
-                shx: text_shx_fonts(drawing, &value.style),
+                shx: text_shx_fonts(drawing, &value.style).map(Box::new),
                 plane: if default_plane {
                     None
                 } else {
@@ -1481,7 +1483,7 @@ fn normalize_entity_in_frame(
                 },
                 text_runs: parsed.runs,
                 text_warnings: parsed.warnings,
-            })
+            })))
         }
         _ => None,
     }
@@ -1776,11 +1778,14 @@ mod tests {
         };
         assert_eq!(scene.entities.len(), 1);
         assert_eq!(scene.entities[0].color_argb, 0xffff0000);
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text) = &scene.entities[0].geometry else {
+            panic!()
+        };
+        let TextGeometry2D {
             background: Some(background),
             origin,
             ..
-        } = &scene.entities[0].geometry
+        } = &**text
         else {
             panic!()
         };
@@ -1828,26 +1833,32 @@ mod tests {
         let SceneDocument::TwoD(scene) = opened.scene else {
             panic!()
         };
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+            panic!("TEXT must retain its projected plane")
+        };
+        let TextGeometry2D {
             origin,
             plane: Some(plane),
             ..
-        } = &scene.entities[0].geometry
+        } = &**text_geometry
         else {
-            panic!("TEXT must retain its projected plane")
+            panic!()
         };
         assert!((origin.x + 10.0).abs() < 1e-12);
         assert!((origin.y - 2.0).abs() < 1e-12);
         assert_eq!(plane.xx, -1.0);
         assert!((plane.yy + 0.8).abs() < 1e-12);
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[1].geometry else {
+            panic!("MTEXT must retain even a vertical WCS direction")
+        };
+        let TextGeometry2D {
             origin,
             rotation,
             plane: Some(plane),
             ..
-        } = &scene.entities[1].geometry
+        } = &**text_geometry
         else {
-            panic!("MTEXT must retain even a vertical WCS direction")
+            panic!()
         };
         assert_eq!(*origin, Point2::new(100.0, 200.0));
         assert_eq!(*rotation, 0.0);
@@ -2010,15 +2021,18 @@ mod tests {
         let SceneDocument::TwoD(scene) = opened.scene else {
             panic!()
         };
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+            panic!("nested text must preserve its full basis")
+        };
+        let TextGeometry2D {
             origin,
             height,
             rotation,
             plane: Some(plane),
             ..
-        } = &scene.entities[0].geometry
+        } = &**text_geometry
         else {
-            panic!("nested text must preserve its full basis")
+            panic!()
         };
         assert_eq!(*height, 12.0);
         assert_eq!(*rotation, 0.3);
@@ -2042,16 +2056,19 @@ mod tests {
             assert!((plane.xx * u + plane.xy * v - x).abs() < 1e-10);
             assert!((plane.yx * u + plane.yy * v - y).abs() < 1e-10);
         }
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[1].geometry else {
+            panic!("MTEXT must preserve its full instance basis")
+        };
+        let TextGeometry2D {
             origin: m_origin,
             height: m_height,
             rotation: m_rotation,
             plane: Some(m_plane),
             wrap_width,
             ..
-        } = &scene.entities[1].geometry
+        } = &**text_geometry
         else {
-            panic!("MTEXT must preserve its full instance basis")
+            panic!()
         };
         assert_eq!(*m_origin, *origin);
         assert_eq!(*m_height, 12.0);
@@ -2109,13 +2126,14 @@ mod tests {
                 -5.0 - (cell / 2) as f64 * 200.0,
                 28.0 + (cell % 2) as f64 * 100.0,
             );
-            let Entity2DGeometry::Text { origin, .. } = pair[0].geometry else {
+            let Entity2DGeometry::Text(text_geometry) = &pair[0].geometry else {
                 panic!()
             };
+            let TextGeometry2D { origin, .. } = &**text_geometry;
             let Entity2DGeometry::Line { start, end } = pair[1].geometry else {
                 panic!()
             };
-            for point in [origin, start] {
+            for point in [*origin, start] {
                 assert!(
                     (point.x - expected.x).abs() < 1e-10,
                     "cell {cell}: {point:?}, expected {expected:?}"
@@ -2248,10 +2266,13 @@ mod tests {
                 false,
             ),
         ] {
-            let matches = scene.entities.iter().filter(|entity| matches!(&entity.geometry, Entity2DGeometry::Text { value: text, .. } if text == value)).collect::<Vec<_>>();
+            let matches = scene.entities.iter().filter(|entity| matches!(&entity.geometry, Entity2DGeometry::Text(text) if &text.value == value)).collect::<Vec<_>>();
             assert_eq!(matches.len(), 4);
             for (cell, entity) in matches.iter().enumerate() {
-                let Entity2DGeometry::Text {
+                let Entity2DGeometry::Text(text_geometry) = &entity.geometry else {
+                    panic!()
+                };
+                let TextGeometry2D {
                     origin,
                     height,
                     rotation,
@@ -2262,10 +2283,7 @@ mod tests {
                     mirrored_x,
                     mirrored_y,
                     ..
-                } = &entity.geometry
-                else {
-                    panic!()
-                };
+                } = &**text_geometry;
                 assert!((origin.x - (start.x - (cell / 2) as f64 * 200.0)).abs() < 1e-10);
                 assert!((origin.y - (start.y + (cell % 2) as f64 * 100.0)).abs() < 1e-10);
                 assert_eq!(*height, 12.0);
@@ -2307,13 +2325,16 @@ mod tests {
                 * Matrix4::scaling(-1.0, 2.0, 3.0),
         );
         let geometry = normalize_attribute(&attribute, &CadDocument::new(), &frame).unwrap();
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = geometry else {
+            panic!()
+        };
+        let TextGeometry2D {
             origin,
             height,
             plane: Some(plane),
             value,
             ..
-        } = geometry
+        } = *text_geometry
         else {
             panic!()
         };
@@ -2352,7 +2373,10 @@ mod tests {
             Matrix4::translation(100.0, 200.0, 0.0) * Matrix4::scaling(2.0, 3.0, 1.0),
         );
         let geometry = normalize_attribute(&attribute, &drawing, &frame).unwrap();
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = geometry else {
+            panic!("expected multiline attribute text");
+        };
+        let TextGeometry2D {
             origin,
             value,
             height,
@@ -2363,10 +2387,7 @@ mod tests {
             vertical_alignment,
             text_warnings,
             ..
-        } = geometry
-        else {
-            panic!("expected multiline attribute text");
-        };
+        } = *text_geometry;
         assert_eq!(origin, point(150.0, 320.0));
         assert_eq!(value, "中文\nالعربية\n日本語");
         assert_eq!(height, 8.0); // local height, scale is carried by the basis
@@ -2499,7 +2520,10 @@ mod tests {
         for (cell, entity) in scene.entities.iter().enumerate() {
             assert_eq!(entity.layer_id, labels);
             assert_eq!(entity.color_argb, acad_color(AcadColor::from_index(5), 0));
-            let Entity2DGeometry::Text {
+            let Entity2DGeometry::Text(text_geometry) = &entity.geometry else {
+                panic!()
+            };
+            let TextGeometry2D {
                 origin,
                 value,
                 height,
@@ -2511,10 +2535,7 @@ mod tests {
                 font_family,
                 plane,
                 ..
-            } = &entity.geometry
-            else {
-                panic!()
-            };
+            } = &**text_geometry;
             assert_eq!(value, "中文 العربية");
             assert!((origin.x - (61.0 - (cell / 2) as f64 * 200.0)).abs() < 1e-10);
             assert!((origin.y - (210.0 + (cell % 2) as f64 * 100.0)).abs() < 1e-10);
@@ -2666,17 +2687,17 @@ mod tests {
             panic!()
         };
         assert_eq!(scene.entities.len(), 1);
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+            panic!()
+        };
+        let TextGeometry2D {
             origin,
             value,
             height,
             wrap_width,
             plane,
             ..
-        } = &scene.entities[0].geometry
-        else {
-            panic!()
-        };
+        } = &**text_geometry;
         assert_eq!(*origin, Point2::new(80.0, 458.0));
         assert_eq!(value, "中文\nالعربية\n日本語");
         assert_eq!(*height, 8.0);
@@ -2779,15 +2800,15 @@ mod tests {
         };
         assert_eq!(scene.entities.len(), 8);
         for entity in &scene.entities {
-            let Entity2DGeometry::Text {
+            let Entity2DGeometry::Text(text_geometry) = &entity.geometry else {
+                panic!()
+            };
+            let TextGeometry2D {
                 value,
                 line_spacing,
                 text_warnings,
                 ..
-            } = &entity.geometry
-            else {
-                panic!()
-            };
+            } = &**text_geometry;
             let (factor, exact) = value
                 .split_whitespace()
                 .next()
@@ -2854,7 +2875,10 @@ mod tests {
         };
         assert_eq!(scene.entities.len(), 3);
         for (index, entity) in scene.entities.iter().enumerate() {
-            let Entity2DGeometry::Text {
+            let Entity2DGeometry::Text(text_geometry) = &entity.geometry else {
+                panic!()
+            };
+            let TextGeometry2D {
                 columns: Some(columns),
                 origin,
                 height,
@@ -2863,7 +2887,7 @@ mod tests {
                 text_runs,
                 text_warnings,
                 ..
-            } = &entity.geometry
+            } = &**text_geometry
             else {
                 panic!()
             };
@@ -2912,7 +2936,10 @@ mod tests {
             .entities
             .iter()
             .filter_map(|entity| match &entity.geometry {
-                Entity2DGeometry::Text { value, .. } => Some(value.as_str()),
+                Entity2DGeometry::Text(text_geometry) => {
+                    let TextGeometry2D { value, .. } = &**text_geometry;
+                    Some(value.as_str())
+                }
                 _ => None,
             })
             .collect();
@@ -2954,12 +2981,15 @@ mod tests {
             .entities
             .iter()
             .filter_map(|entity| match &entity.geometry {
-                Entity2DGeometry::Text {
-                    value,
-                    text_runs,
-                    text_warnings,
-                    ..
-                } => Some((value, text_runs, text_warnings)),
+                Entity2DGeometry::Text(text_geometry) => {
+                    let TextGeometry2D {
+                        value,
+                        text_runs,
+                        text_warnings,
+                        ..
+                    } = &**text_geometry;
+                    Some((value, text_runs, text_warnings))
+                }
                 _ => None,
             })
             .collect();
@@ -3177,14 +3207,16 @@ mod tests {
         let mut centered = Text::with_value("标题", Vector3::new(10.0, 20.0, 0.0));
         centered.alignment_point = Some(Vector3::new(30.0, 40.0, 0.0));
         centered.horizontal_alignment = TextHorizontalAlignment::Center;
-        let Some(Entity2DGeometry::Text {
-            origin,
-            horizontal_alignment,
-            ..
-        }) = normalize_entity(&EntityType::Text(centered), &drawing)
+        let Some(Entity2DGeometry::Text(text)) =
+            normalize_entity(&EntityType::Text(centered), &drawing)
         else {
             panic!("expected centered text");
         };
+        let TextGeometry2D {
+            origin,
+            horizontal_alignment,
+            ..
+        } = *text;
         assert_eq!(origin, Point2::new(30.0, 40.0));
         assert!(matches!(
             horizontal_alignment,
@@ -3194,14 +3226,16 @@ mod tests {
         let mut fitted = Text::with_value("核  定", Vector3::new(1.0, 2.0, 0.0));
         fitted.alignment_point = Some(Vector3::new(11.0, 2.0, 0.0));
         fitted.horizontal_alignment = TextHorizontalAlignment::Fit;
-        let Some(Entity2DGeometry::Text {
-            origin,
-            target_width,
-            ..
-        }) = normalize_entity(&EntityType::Text(fitted), &drawing)
+        let Some(Entity2DGeometry::Text(text)) =
+            normalize_entity(&EntityType::Text(fitted), &drawing)
         else {
             panic!("expected fitted text");
         };
+        let TextGeometry2D {
+            origin,
+            target_width,
+            ..
+        } = *text;
         assert_eq!(origin, Point2::new(1.0, 2.0));
         assert_eq!(target_width, Some(10.0));
     }

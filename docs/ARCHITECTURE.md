@@ -37,12 +37,26 @@ testing first queries the R-tree then computes exact primitive distance.
 Snapping currently covers point, endpoint, midpoint, vertex, center and text
 insertion points.
 
-The transitional Flutter renderer receives the initial geometry only for
-scenes of at most 250,000 entities; larger scenes initially return metadata.
-Viewport queries return all visible-layer R-tree candidates without stride
-sampling or truncating details. A zoom-to-fit query can therefore still return
-a large payload: the pending native texture renderer is required for the large
-file memory/performance gates. The complete scene remains in Rust.
+The Flutter UI uses `beginOpenDocumentCompact` for metadata-first 2D loading.
+After exact text-envelope refinement, scenes of at most 250,000 entities use
+`documentPacket`; larger scenes obtain geometry through `viewportPacket`.
+Both use the lossless [CAD2D001 runtime format](SCENE_PACKET.md), preserving
+source order and all visible-layer R-tree candidates without stride sampling
+or truncating details. Dart retains numeric records as lazy read-only views,
+not a complete tree of geometry maps. Legacy JSON APIs remain compatible;
+3D now uses the lossless CAD3D001 packet described in the same document.
+A zoom-to-fit query can still return a large packet and
+large paths: native textures are still needed for the large-file gates.
+The complete authoritative scene remains in Rust.
+
+R-tree candidates carry source-vector offsets so viewport/point queries do
+not scan the complete scene afterwards. The Flutter viewport loader retains
+exact geometry in a guard band, allows a single native query/decode in flight,
+and coalesces pending cameras. It invalidates coverage on layer changes and
+does no work while idle. Large DXF normalization retains metadata/definitions
+and streams assembled entities in a second typed pass; large DXF and DWG
+cache encoding borrows the scene and uses atomic streamed writes. See
+[PERFORMANCE.md](PERFORMANCE.md) for measured costs and remaining limitations.
 
 CAD text is shaped once at a fixed, camera-independent font size. Text-only
 metadata pages (up to 64 labels and approximately 64 KiB including style runs;
@@ -157,7 +171,7 @@ source ranges, rather than repartitioning a second natural-height block.
 The last column retains excess content instead of silently discarding labels.
 Column paragraphs are owned by their block and the LRU additionally bounds the
 number of retained paragraphs. DWG embedded height/total extents survive the
-vendored reader/domain/writer; parser version `cadview-17` and scene cache 31
+vendored reader/domain/writer; parser version `cadview-17` and scene cache 32
 invalidate previously flattened cached scenes. Original-CAD visual parity,
 vertical text flow and legacy linked-column XDATA remain unverified/incomplete.
 
@@ -172,11 +186,79 @@ readable label and emit aggregated diagnostics when styling falls back.
 Unsupported inline width, tracking, oblique/color/paragraph/stack formatting
 is diagnosed, not claimed as original-CAD-equivalent typography.
 
+### Precision interaction and query lifetime
+
+2D hit tests, nearest snaps and intersection snaps run on Rust bridge workers.
+The Dart API remains asynchronous. Long-press previews allow one running query
+and only the latest pending position; release reserves its place in a separate
+ordered commit queue and performs one final query. A subsequent tap cannot
+overtake that release. Tool changes, camera gestures, viewport resize, layer
+changes, clear/undo and disposal invalidate outstanding commits, including 3D
+ray picks. Failed queries leave measurement points unchanged.
+
+Finger movement inside the 3× loupe is divided by three. Its diameter is
+144 logical pixels on phones and 176 on viewports whose screen shortest side
+is at least 600; it stays within the drawing area. Pen/mouse input keeps direct
+positioning and a smaller snap aperture (6 pixels, 4 during a precision hold).
+Touch uses 18 pixels ordinarily and 6 in the loupe. Entity tools retain the
+actual touched position; long-press area collection never substitutes the
+one-tap whole-boundary shortcut. Distance and angle tools expose undo/clear.
+
+Dense intersection queries have no fixed curve-count truncation. Coincident
+geometry is deduplicated in source order, local bounds reject unrelated pairs,
+and exact curve distances bound the remaining search. Explicit polyline snap
+vertices are scanned by reference without per-vertex strings or point arrays.
+Source f64 geometry, face/entity IDs and measurement units remain authoritative.
+
+Raster gesture snapshots may only serve unchanged-scale pans whose entire
+viewport remains inside the captured margin. Zoom or a pan beyond that margin
+uses exact geometry, preventing uncaptured blank strips, enlarged cosmetic
+strokes and magnification of previously reduced text details.
+
 ## 3D scene
+
+Compact open returns assembly/material/bounds/statistics metadata rather than
+full mesh JSON. `documentPacket` dispatches by scene kind: CAD3D001 stores
+f64 XYZ, native f32 normals and u32 topology in contiguous immutable buffers.
+Mesh properties remain metadata JSON; lazy vertex-map views preserve the
+existing property/measurement interface. The painter projects directly from
+the f64 buffer, without a second full `CadPoint3` or index list. Origin
+relocation still occurs in f64 before screen float32 conversion. Unaligned
+bridge slices copy directly into typed buffers, without boxed staging lists.
+Viewport replacement and viewer disposal explicitly reset native 2D paths
+and release mesh display lists/projection caches. Previously recorded frames
+remain valid; independent pixel tests also check idempotent disposal and
+exact reconstruction after release. This avoids relying only on Dart GC to
+notice native memory behind small path/picture handles.
 
 The normalized scene stores assembly nodes, mesh instances, materials,
 positions, normals, indices, bounds and statistics. Current Flutter rendering
-is a triangle-budgeted preview intended for development and small files.
+is an exact batched wireframe preview, with no triangle stride sampling.
+Each projected vertex has a reusable one-byte viewport outcode. Only a
+triangle whose three vertices are beyond the same viewport side is rejected,
+with a four-logical-pixel stroke/antialias margin. Edges crossing the viewport
+remain intact even when all endpoints are offscreen; visible commands retain
+source order and measured-face boundaries. Camera, viewport size, selection
+and measured-face state invalidate the retained recording. Viewport size is
+checked independently of projection, so widening a view with compensated pan
+cannot incorrectly reuse a clipped recording.
+Packed mesh decode additionally builds immutable f64 AABBs for source-order
+512-triangle chunks, fusing index-range validation with bound construction
+off the UI isolate. These bounds use actual indexed vertices, not declared
+scene bounds. A conservative interval projection skips fully offscreen
+chunks before visiting their triangles; remaining triangles retain the
+vertex outcode test and all source edges/highlight indices. The index costs
+48 bytes per chunk and does not duplicate vertices/topology or change the
+packet/cache schema. Overflow fails open instead of discarding geometry.
+Chunk visibility is decided before vertex projection. Packed views with less
+than one quarter of chunks potentially visible project only referenced
+vertices, once per camera/size epoch; dense views keep linear full projection.
+A complete/sparse distinction prevents incomplete buffers being reused in
+overview views. Byte epochs wrap with an explicit reset; changing viewport
+size also invalidates codes even with an identical compensated projection.
+Initially fully offscreen meshes allocate no projection buffers. No cached
+float32 coordinates are rescaled: every needed new projection uses source
+f64 geometry and the same origin-subtracted arithmetic as the dense path.
 Production 500 MB / five-million-triangle acceptance requires the pending
 `cad-render` wgpu module, native Flutter external textures, BVH, instancing,
 frustum culling and disk-backed LOD.
@@ -261,4 +343,3 @@ acadrust's parsed context for DWG and from `dxf_raw.rs` for DXF) and builds
 leader lines, doglegs and arrowheads. Text and block content go back through
 each adapter's MTEXT and INSERT normalization, and ACAD_TABLE becomes a
 synthetic INSERT of its `*T` block in both formats.
-

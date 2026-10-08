@@ -1,5 +1,7 @@
 import 'dart:ui';
 
+import 'cad_scene_packet.dart';
+
 class CadDocumentModel {
   CadDocumentModel({
     required this.format,
@@ -42,6 +44,43 @@ class CadDocumentModel {
   late final List<Map<String, dynamic>> meshes = _decodeMeshes();
   late final List<CadAssemblyNode> assemblyRoots = _decodeAssemblyRoots();
   late final Set<int> visibleMeshIds = _decodeVisibleMeshIds();
+  final _recentEntities = <int, Map<String, dynamic>?>{};
+
+  /// Packed scene IDs use a verified sorted lookup, including sparse IDs and
+  /// first occurrences of duplicates. Legacy sequential IDs are checked
+  /// directly; nonsequential legacy IDs use an exact fallback. Only 128
+  /// recent lookups are retained; no million-entry Dart index is allocated.
+  Map<String, dynamic>? entityById(int id) {
+    if (_recentEntities.containsKey(id)) return _recentEntities[id];
+    Map<String, dynamic>? found;
+    final retained = entities;
+    if (retained is CadPackedEntities) {
+      final index = retained.indexOfId(id);
+      if (index >= 0) found = retained[index];
+    } else if (retained.isNotEmpty) {
+      final firstId = retained.first['id'];
+      if (firstId is int) {
+        final guess = id - firstId;
+        if (guess >= 0 && guess < retained.length) {
+          final candidate = retained[guess];
+          if (candidate['id'] == id) found = candidate;
+        }
+      }
+      if (found == null) {
+        for (final entity in retained) {
+          if (entity['id'] == id) {
+            found = entity;
+            break;
+          }
+        }
+      }
+    }
+    if (_recentEntities.length >= 128) {
+      _recentEntities.remove(_recentEntities.keys.first);
+    }
+    _recentEntities[id] = found;
+    return found;
+  }
 
   CadDocumentModel withLayerStateFrom(CadDocumentModel source) {
     if (sceneKind != 'two_d' || source.sceneKind != 'two_d') return source;
@@ -58,6 +97,20 @@ class CadDocumentModel {
     );
   }
 
+  CadDocumentModel withAssemblyStateFrom(CadDocumentModel source) {
+    if (sceneKind != 'three_d' || source.sceneKind != 'three_d') return source;
+    return CadDocumentModel(
+      format: format,
+      displayName: displayName,
+      units: units,
+      frames: frames,
+      sceneKind: sceneKind,
+      diagnostics: source.diagnostics,
+      scene: Map<String, dynamic>.from(scene)
+        ..['root_nodes'] = source.scene['root_nodes'],
+    );
+  }
+
   List<CadLayerModel> _decodeLayers() {
     if (sceneKind != 'two_d') return const [];
     return (scene['layers'] as List<dynamic>)
@@ -67,7 +120,9 @@ class CadDocumentModel {
 
   List<Map<String, dynamic>> _decodeEntities() {
     if (sceneKind != 'two_d') return const [];
-    return (scene['entities'] as List<dynamic>).cast<Map<String, dynamic>>();
+    final values = scene['entities'];
+    if (values is List<Map<String, dynamic>>) return values;
+    return (values as List<dynamic>).cast<Map<String, dynamic>>();
   }
 
   Rect? _decodeBounds2D() {

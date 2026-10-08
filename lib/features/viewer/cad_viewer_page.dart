@@ -15,8 +15,11 @@ import '../../core/sheet_export.dart';
 import '../../l10n/app_localizations.dart';
 import 'cad_document_model.dart';
 import 'cad_entity_metrics.dart';
+import 'cad_pick_queue.dart';
 import 'cad_scene_painter.dart';
+import 'cad_scene_snapshot.dart';
 import 'cad_units.dart';
+import 'cad_viewport_loader.dart';
 import 'pdf_document_viewport.dart';
 
 enum ViewerTool {
@@ -245,10 +248,55 @@ class _CadViewerPageState extends State<CadViewerPage> {
   Offset? _scaleAnchor2D;
   CadPoint3? _scaleAnchor3D;
   bool _isInteracting = false;
+
+  /// Gesture snapshot state; see [_cameraPainter].
+  CadSceneSnapshot? _snapshot;
+  CadScenePainter? _exactPainter;
+  Size _exactPainterSize = Size.zero;
+  double _pixelRatio = 1;
+  bool _snapshotShown = false;
+  bool _gesturePaused = false;
+  Timer? _snapshotTimer;
+  int _snapshotCapture = 0;
   Offset? _precisionPosition;
   CadSnap? _precisionSnap;
   int _precisionRequest = 0;
   int _activePointers = 0;
+  ui.PointerDeviceKind _inputKind = ui.PointerDeviceKind.touch;
+  Offset? _precisionStart;
+  final _pickQueue = CadPickQueue();
+  bool Function() _pickCurrent = () => false;
+  double _pickAperture = 18;
+  bool get _canApplyPick => mounted && _pickCurrent();
+  late final _precisionQueries =
+      CadLatestPick<
+        ({
+          Offset world,
+          CadViewTransform transform,
+          bool area,
+          double aperture,
+        }),
+        CadSnap
+      >(
+        (pick) => pick.area
+            ? _snapAreaWorldPoint(
+                pick.world,
+                pick.transform,
+                aperture: pick.aperture,
+              )
+            : _snapWorldPoint(
+                pick.world,
+                pick.transform,
+                aperture: pick.aperture,
+              ),
+      );
+
+  bool get _touchInput => _inputKind == ui.PointerDeviceKind.touch;
+
+  void _invalidatePicks() {
+    _pickQueue.cancel();
+    _cancelPrecisionPick();
+  }
 
   bool get _canPrecisionPick =>
       _tool != ViewerTool.pan && _tool != ViewerTool.annotate;
@@ -275,6 +323,8 @@ class _CadViewerPageState extends State<CadViewerPage> {
 
   void _cancelPrecisionPick() {
     _precisionRequest++;
+    _precisionQueries.cancel();
+    _precisionStart = null;
     _precisionPosition = null;
     _precisionSnap = null;
   }
@@ -282,9 +332,13 @@ class _CadViewerPageState extends State<CadViewerPage> {
   Future<void> _previewPrecisionPick(Offset local, Size size) async {
     if (!_canPrecisionPick || _activePointers > 1) return;
     final request = ++_precisionRequest;
+    final start = _precisionStart ??= local;
+    // Touch movement is one-to-one inside the 3x loupe, allowing sub-pixel
+    // world targeting. Pens/mice keep their direct pointer positioning.
+    final fine = _touchInput ? start + (local - start) / 3 : local;
     final position = Offset(
-      local.dx.clamp(0.0, size.width),
-      local.dy.clamp(0.0, size.height),
+      fine.dx.clamp(0.0, size.width),
+      fine.dy.clamp(0.0, size.height),
     );
     setState(() {
       _precisionPosition = position;
@@ -295,9 +349,12 @@ class _CadViewerPageState extends State<CadViewerPage> {
     final world = transform.screenToWorld(position);
     try {
       // Keep the aperture at 18 visible pixels inside the 3x loupe.
-      final snap = _tool == ViewerTool.measureArea
-          ? await _snapAreaWorldPoint(world, transform, aperture: 6)
-          : await _snapWorldPoint(world, transform, aperture: 6);
+      final snap = await _precisionQueries.request((
+        world: world,
+        transform: transform,
+        area: _tool == ViewerTool.measureArea,
+        aperture: _touchInput ? 6 : 4,
+      ));
       if (!mounted || request != _precisionRequest) return;
       setState(() => _precisionSnap = snap);
     } catch (_) {
@@ -308,21 +365,41 @@ class _CadViewerPageState extends State<CadViewerPage> {
   Future<void> _finishPrecisionPick(Offset local, Size size) async {
     if (_precisionPosition == null) return;
     final tool = _tool;
-    final preview = _previewPrecisionPick(local, size);
-    final request = _precisionRequest;
-    await preview;
-    if (!mounted || request != _precisionRequest || tool != _tool) return;
-    final position = _precisionPosition;
-    final snap = _precisionSnap;
+    final start = _precisionStart ?? local;
+    final fine = _touchInput ? start + (local - start) / 3 : local;
+    final position = Offset(
+      fine.dx.clamp(0.0, size.width),
+      fine.dy.clamp(0.0, size.height),
+    );
+    final aperture = _touchInput ? 6.0 : 4.0;
     setState(_cancelPrecisionPick);
-    if (position != null) {
-      await _onTap(position, size, precise: true, snap: snap);
-    }
+    // Reserve release order immediately. The final exact query belongs to
+    // the committed pick, not to the cancellable preview of the next touch.
+    await _commitPick(() async {
+      CadSnap? snap;
+      if (_document.sceneKind == 'two_d' && _picksGeometryPoint) {
+        final transform = CadViewTransform.forScene(
+          _document,
+          size,
+          _zoom,
+          _pan,
+        );
+        final world = transform.screenToWorld(position);
+        snap = tool == ViewerTool.measureArea
+            ? await _snapAreaWorldPoint(world, transform, aperture: aperture)
+            : await _snapWorldPoint(world, transform, aperture: aperture);
+      }
+      if (!_canApplyPick || tool != _tool) return;
+      await _applyTap(position, size, precise: true, snap: snap);
+    }, aperture);
   }
 
   Widget _buildPrecisionLoupe(Size size) {
     final position = _precisionPosition!;
-    final diameter = math.min(144.0, math.min(size.width, size.height));
+    final diameter = math.min(
+      MediaQuery.sizeOf(context).shortestSide >= 600 ? 176.0 : 144.0,
+      math.min(size.width, size.height),
+    );
     final radius = diameter / 2;
     final center = Offset(
       position.dx.clamp(radius, size.width - radius),
@@ -380,6 +457,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
   bool _viewportRefreshScheduled = false;
   bool _visibilityUpdating = false;
   Timer? _interactionViewportTimer;
+  late final CadViewportLoader _viewportLoader;
   bool _viewerChromeVisible = false;
   late final CadEngineeringUnit? _sourceUnit;
   CadEngineeringUnit? _displayUnit;
@@ -389,6 +467,15 @@ class _CadViewerPageState extends State<CadViewerPage> {
   @override
   void initState() {
     super.initState();
+    _viewportLoader = CadViewportLoader((bounds) async {
+      final document = await widget.engine.loadViewport(
+        widget.opened.sessionId,
+        bounds,
+      );
+      // Prepared between frames, before it replaces the shown viewport.
+      await CadScenePainter.prepareDocument(document);
+      return document;
+    });
     _sourceUnit = cadEngineeringUnitById(_document.units);
     _displayUnit = _sourceUnit;
     unawaited(_applySystemUi());
@@ -405,17 +492,86 @@ class _CadViewerPageState extends State<CadViewerPage> {
     unawaited(_applySystemUi());
   }
 
+  /// While a 2D gesture only moves the camera, a snapshot of the same scene
+  /// is scaled and translated instead of drawing every entity per frame.
+  /// Otherwise (and when a gesture pauses) the scene is drawn exactly, and
+  /// a new snapshot is rendered once the view has been still briefly.
+  CustomPainter _cameraPainter(
+    Size size,
+    double pixelRatio,
+    CadScenePainter painter,
+  ) {
+    _exactPainter = painter;
+    _exactPainterSize = size;
+    _pixelRatio = pixelRatio;
+    final snapshot = _snapshot;
+    _snapshotShown =
+        _isInteracting &&
+        !_gesturePaused &&
+        painter.document.sceneKind == 'two_d' &&
+        snapshot != null &&
+        snapshot.canPanTo(painter, size);
+    if (painter.document.sceneKind == 'two_d') {
+      _snapshotTimer?.cancel();
+      _snapshotTimer = Timer(const Duration(milliseconds: 250), _onCameraStill);
+    }
+    return _snapshotShown
+        ? CadSnapshotPainter(snapshot!, zoom: painter.zoom, pan: painter.pan)
+        : painter;
+  }
+
+  void _onCameraStill() {
+    if (!mounted) return;
+    if (_snapshotShown) {
+      // A paused gesture shows the exact scene and loads its viewport.
+      setState(() => _gesturePaused = true);
+      unawaited(_refreshViewport());
+      return;
+    }
+    final painter = _exactPainter;
+    final size = _exactPainterSize;
+    final current = _snapshot;
+    if (painter == null || size.isEmpty) return;
+    if (current != null &&
+        current.matches(painter, size) &&
+        current.sameCamera(painter)) {
+      return;
+    }
+    final capture = ++_snapshotCapture;
+    unawaited(
+      CadSceneSnapshot.capture(painter, size, _pixelRatio).then((snapshot) {
+        if (!mounted ||
+            capture != _snapshotCapture ||
+            !snapshot.matches(_exactPainter ?? painter, _exactPainterSize)) {
+          snapshot.dispose();
+          return;
+        }
+        _snapshot?.dispose();
+        _snapshot = snapshot;
+      }, onError: (Object _) {}),
+    );
+  }
+
   @override
   void dispose() {
-    _cancelPrecisionPick();
+    _snapshotTimer?.cancel();
+    _snapshotCapture++;
+    _snapshot?.dispose();
+    _snapshot = null;
+    _invalidatePicks();
     _interactionViewportTimer?.cancel();
+    _viewportLoader.dispose();
+    CadScenePainter.releaseDocument(_document);
+    if (!identical(_document, widget.opened.document)) {
+      CadScenePainter.releaseDocument(widget.opened.document);
+    }
     widget.engine.closeDocument(widget.opened.sessionId);
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     super.dispose();
   }
 
   void _resetView() {
-    _cancelPrecisionPick();
+    _invalidatePicks();
     final orientation = cadStandardViewOrientation(CadStandardView.isometric);
     setState(() {
       _zoom = 1;
@@ -427,7 +583,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
   }
 
   void _onScaleStart(ScaleStartDetails details, Size size) {
-    _cancelPrecisionPick();
+    _invalidatePicks();
     _gesturePointerCount = details.pointerCount;
     _startGestureScale = 1;
     _captureGestureBaseline(details.localFocalPoint, size);
@@ -495,6 +651,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
     }
     if (_tool != ViewerTool.pan && details.pointerCount == 1) return;
     setState(() {
+      _gesturePaused = false;
       _zoom = (_startZoom * scaleFactor).clamp(0.05, 100);
       final anchor = _scaleAnchor2D;
       if (anchor != null) {
@@ -512,6 +669,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
 
   void _onScaleEnd(ScaleEndDetails details) {
     _interactionViewportTimer?.cancel();
+    _gesturePaused = false;
     if (_isInteracting) setState(() => _isInteracting = false);
     unawaited(_refreshViewport());
   }
@@ -534,17 +692,17 @@ class _CadViewerPageState extends State<CadViewerPage> {
       math.max(first.dx, second.dx),
       math.max(first.dy, second.dy),
     );
-    // Retain a generous guard band and refresh it during a drag. This prevents
-    // geometry entering from any edge from disappearing until gesture end.
-    final padding = math.max(bounds.width, bounds.height) * 0.5;
     final request = ++_viewportRequest;
     try {
-      final updated = await widget.engine.loadViewport(
-        widget.opened.sessionId,
-        bounds.inflate(padding),
-      );
-      if (!mounted || request != _viewportRequest) return;
-      setState(() => _document = updated);
+      final updated = await _viewportLoader.load(bounds);
+      if (!mounted || request != _viewportRequest || updated == null) return;
+      if (!identical(_document, updated)) {
+        final previous = _document;
+        setState(() => _document = updated);
+        if (!identical(previous, updated)) {
+          CadScenePainter.releaseDocument(previous);
+        }
+      }
     } catch (_) {
       if (propagateFailure) rethrow;
       // Keep the last valid retained batch if a viewport refresh is cancelled
@@ -553,6 +711,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
   }
 
   void _scheduleInteractiveViewportRefresh() {
+    // A snapshot stands in until the gesture ends or pauses; replacing the
+    // viewport batch now would only force exact frames again.
+    if (_snapshotShown) return;
     if (_document.sceneKind != 'two_d' ||
         (_interactionViewportTimer?.isActive ?? false)) {
       return;
@@ -581,6 +742,49 @@ class _CadViewerPageState extends State<CadViewerPage> {
       if (!_isInteracting) _toggleViewerChrome();
       return;
     }
+    final aperture = precise
+        ? (_touchInput ? 6.0 : 4.0)
+        : (_touchInput ? 18.0 : 6.0);
+    await _commitPick(
+      () => _applyTap(local, size, precise: precise, snap: snap),
+      aperture,
+    );
+  }
+
+  Future<void> _commitPick(
+    Future<void> Function() action,
+    double aperture,
+  ) async {
+    bool Function() current = () => false;
+    try {
+      await _pickQueue.add((isCurrent) async {
+        if (!mounted) return;
+        current = isCurrent;
+        _pickCurrent = isCurrent;
+        _pickAperture = aperture;
+        try {
+          await action();
+        } finally {
+          _pickCurrent = () => false;
+        }
+      });
+    } catch (_) {
+      if (mounted && current()) {
+        _showViewerMessage(context.l10n.text('pickFailed'));
+      }
+    }
+  }
+
+  Future<void> _applyTap(
+    Offset local,
+    Size size, {
+    bool precise = false,
+    CadSnap? snap,
+  }) async {
+    if (_tool == ViewerTool.pan) {
+      if (!_isInteracting) _toggleViewerChrome();
+      return;
+    }
     if (_document.sceneKind == 'three_d') {
       final transform = Cad3DViewTransform.forScene(
         _document,
@@ -590,8 +794,14 @@ class _CadViewerPageState extends State<CadViewerPage> {
         _yaw,
         _pitch,
       );
-      final hit = transform.hitTest(_document, local);
-      if (!mounted) return;
+      final engine = widget.engine;
+      final hit = engine is CadRayPicker
+          ? await (engine as CadRayPicker).hitTestRay(
+              widget.opened.sessionId,
+              transform.screenRay(local),
+            )
+          : transform.hitTest(_document, local);
+      if (!mounted || !_pickCurrent()) return;
       if (_tool == ViewerTool.select) {
         setState(() {
           _meshHit = hit;
@@ -712,9 +922,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
         widget.opened.sessionId,
         world.dx,
         world.dy,
-        12 / transform.scale,
+        math.min(12, _pickAperture) / transform.scale,
       );
-      if (!mounted) return;
+      if (!mounted || !_pickCurrent()) return;
       setState(() {
         _hit = hit;
         _selectedEntityId = hit?.entityId;
@@ -769,15 +979,16 @@ class _CadViewerPageState extends State<CadViewerPage> {
     }
     if (_tool == ViewerTool.measureArea) {
       if (!precise) snap = await _snapAreaWorldPoint(world, transform);
-      if (!mounted) return;
+      if (!mounted || !_pickCurrent()) return;
       // An intersection is an intentional engineering pick. Give it priority
       // over the one-tap closed-boundary shortcut when both are under the tap.
-      if (_measurementPoints.isEmpty &&
+      if (!precise &&
+          _measurementPoints.isEmpty &&
           snap?.kind != 'intersection' &&
           await _measureClosedAreaAt(world, transform)) {
         return;
       }
-      if (!mounted) return;
+      if (!mounted || !_pickCurrent()) return;
     }
     if (_tool == ViewerTool.measureCoordinate ||
         _tool == ViewerTool.collectCoordinates ||
@@ -797,7 +1008,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
         _tool == ViewerTool.setCoordinateAxis) {
       final snapped =
           snap ?? (precise ? null : await _snapWorldPoint(world, transform));
-      if (!mounted) return;
+      if (!mounted || !_pickCurrent()) return;
       world = snapped?.position ?? world;
       snap = snapped;
     }
@@ -1129,20 +1340,20 @@ class _CadViewerPageState extends State<CadViewerPage> {
   Future<CadSnap?> _snapWorldPoint(
     Offset world,
     CadViewTransform transform, {
-    double aperture = 18,
+    double? aperture,
   }) => widget.engine.snap(
     widget.opened.sessionId,
     world.dx,
     world.dy,
-    aperture / transform.scale,
+    (aperture ?? _pickAperture) / transform.scale,
   );
 
   Future<CadSnap?> _snapAreaWorldPoint(
     Offset world,
     CadViewTransform transform, {
-    double aperture = 18,
+    double? aperture,
   }) async {
-    final tolerance = aperture / transform.scale;
+    final tolerance = (aperture ?? _pickAperture) / transform.scale;
     final intersection = await widget.engine.snapIntersection(
       widget.opened.sessionId,
       world.dx,
@@ -1166,9 +1377,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity =
         hit != null && (hit.entityKind == 'circle' || hit.entityKind == 'arc')
         ? _entityById(hit.entityId)
@@ -1209,9 +1420,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final radial = geometry is Map<String, dynamic>
@@ -1265,9 +1476,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final length = geometry is Map<String, dynamic>
@@ -1313,9 +1524,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final area = geometry is Map<String, dynamic>
@@ -1371,6 +1582,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
   }
 
   void _toggleAreaTakeoffMode() {
+    _invalidatePicks();
     setState(() => _areaTakeoffSubtractMode = !_areaTakeoffSubtractMode);
   }
 
@@ -1385,9 +1597,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
         widget.opened.sessionId,
         world.dx,
         world.dy,
-        18 / transform.scale,
+        _pickAperture / transform.scale,
       );
-      if (!mounted) return;
+      if (!mounted || !_pickCurrent()) return;
       final entity = hit == null ? null : _entityById(hit.entityId);
       final geometry = entity?['geometry'];
       final baseline = geometry is Map<String, dynamic>
@@ -1411,7 +1623,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
     final snap = precise
         ? resolvedSnap
         : await _snapWorldPoint(world, transform);
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final point = snap?.position ?? world;
     final baseline = _stationBaseline!;
     final measurement = cadStationMeasurement2D(baseline, point);
@@ -1436,9 +1648,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final baseline = geometry is Map<String, dynamic>
@@ -1664,9 +1876,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final baseline = geometry is Map<String, dynamic>
@@ -1717,9 +1929,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final segment = geometry is Map<String, dynamic>
@@ -1776,9 +1988,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final segment = geometry is Map<String, dynamic>
@@ -1843,9 +2055,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return;
+    if (!mounted || !_pickCurrent()) return;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final segment = geometry is Map<String, dynamic>
@@ -1912,9 +2124,9 @@ class _CadViewerPageState extends State<CadViewerPage> {
       widget.opened.sessionId,
       world.dx,
       world.dy,
-      18 / transform.scale,
+      _pickAperture / transform.scale,
     );
-    if (!mounted) return false;
+    if (!mounted || !_pickCurrent()) return false;
     final entity = hit == null ? null : _entityById(hit.entityId);
     final geometry = entity?['geometry'];
     final areaMeasurement = geometry is Map<String, dynamic>
@@ -1956,11 +2168,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
   }
 
   Map<String, dynamic>? _entityById(BigInt id) {
-    for (final entity in _document.entities) {
-      final value = entity['id'];
-      if (value is int && BigInt.from(value) == id) return entity;
-    }
-    return null;
+    return _document.entityById(id.toInt());
   }
 
   Future<void> _showEntityProperties(CadHit hit) async {
@@ -4882,6 +5090,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
     );
     if (selected == null || !mounted) return;
     final orientation = cadStandardViewOrientation(selected);
+    _invalidatePicks();
     setState(() {
       _yaw = orientation.yaw;
       _pitch = orientation.pitch;
@@ -4910,7 +5119,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
   };
 
   void _activateTool(ViewerTool tool) {
-    _cancelPrecisionPick();
+    _invalidatePicks();
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     setState(() {
       if (_selectedEntityId == _measuredAreaEntityId) {
@@ -4964,6 +5173,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
   }
 
   void _undoMeasurementPoint() {
+    _invalidatePicks();
     if (_tool == ViewerTool.measureArea && _measuredAreaEntityId != null) {
       setState(() {
         if (_selectedEntityId == _measuredAreaEntityId) {
@@ -5174,6 +5384,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
   }
 
   void _clearMeasurementPoints() {
+    _invalidatePicks();
     setState(() {
       if (_selectedEntityId == _measuredAreaEntityId) {
         _selectedEntityId = null;
@@ -5593,6 +5804,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
 
   Future<void> _setLayerVisibilities(Map<BigInt, bool> changes) async {
     if (_visibilityUpdating || changes.isEmpty) return;
+    _invalidatePicks();
     setState(() => _visibilityUpdating = true);
     try {
       final updated = await widget.engine.setVisibilities(
@@ -5603,7 +5815,19 @@ class _CadViewerPageState extends State<CadViewerPage> {
       // Preserve the retained viewport entities while immediately applying the
       // authoritative native layer states. Hidden geometry disappears at once;
       // newly shown geometry arrives in the single exact viewport refresh.
-      setState(() => _document = _document.withLayerStateFrom(updated));
+      var previous = _document;
+      var next = previous.withLayerStateFrom(updated);
+      await CadScenePainter.prepareDocument(next);
+      if (!mounted) return;
+      if (!identical(previous, _document)) {
+        // A viewport refresh replaced the batch meanwhile; apply the layer
+        // states to the current one instead of restoring the older batch.
+        previous = _document;
+        next = previous.withLayerStateFrom(updated);
+      }
+      setState(() => _document = next);
+      CadScenePainter.releaseDocument(previous);
+      _viewportLoader.invalidate();
       await _refreshViewport();
     } catch (error) {
       if (mounted) {
@@ -5630,12 +5854,15 @@ class _CadViewerPageState extends State<CadViewerPage> {
   });
 
   Future<void> _setAssembly(CadAssemblyNode node, bool visible) async {
+    _invalidatePicks();
     final updated = await widget.engine.setVisibility(
       widget.opened.sessionId,
       node.id,
       visible,
     );
-    if (mounted) setState(() => _document = updated);
+    if (mounted) {
+      setState(() => _document = _document.withAssemblyStateFrom(updated));
+    }
   }
 
   void _showLayers() {
@@ -6044,7 +6271,10 @@ class _CadViewerPageState extends State<CadViewerPage> {
     final annotationsAvailable =
         DistributionConfig.fullFeatures && widget.opened.formatId != 'pdf';
     final editingMultiPointMeasurement =
-        ((_tool == ViewerTool.measureArea ||
+        ((_tool == ViewerTool.measure ||
+                _tool == ViewerTool.measureAngle ||
+                _tool == ViewerTool.measureCoordinate ||
+                _tool == ViewerTool.measureArea ||
                 _tool == ViewerTool.measureRectangle ||
                 _tool == ViewerTool.measureOrientedRectangle ||
                 _tool == ViewerTool.measureCircle3Point ||
@@ -6277,6 +6507,7 @@ class _CadViewerPageState extends State<CadViewerPage> {
                     builder: (context, constraints) {
                       final size = constraints.biggest;
                       final viewportChanged = size != _viewportSize;
+                      if (viewportChanged) _invalidatePicks();
                       _viewportSize = size;
                       if (_document.sceneKind == 'two_d' &&
                           (!_initialViewportRequested || viewportChanged)) {
@@ -6284,7 +6515,8 @@ class _CadViewerPageState extends State<CadViewerPage> {
                         _scheduleViewportRefresh();
                       }
                       return Listener(
-                        onPointerDown: (_) {
+                        onPointerDown: (event) {
+                          if (_activePointers == 0) _inputKind = event.kind;
                           _activePointers++;
                           if (_activePointers > 1) {
                             setState(_cancelPrecisionPick);
@@ -6337,121 +6569,131 @@ class _CadViewerPageState extends State<CadViewerPage> {
                               RepaintBoundary(
                                 key: _imageCaptureKey,
                                 child: CustomPaint(
-                                  painter: CadScenePainter(
-                                    document: _document,
-                                    zoom: _zoom,
-                                    pan: _pan,
-                                    annotations: _annotations,
-                                    selectedEntityId: _selectedEntityId,
-                                    selectedEntityIds: {
-                                      ..._lengthEntityMeasurements.keys,
-                                      ..._areaEntityMeasurements.keys,
-                                      ..._lineIntersectionEntityIds,
-                                      ..._radialClearanceEntityIds,
-                                    },
-                                    subtractedEntityIds: Set.of(
-                                      _subtractedAreaEntityIds,
+                                  painter: _cameraPainter(
+                                    size,
+                                    MediaQuery.devicePixelRatioOf(context),
+                                    CadScenePainter(
+                                      document: _document,
+                                      zoom: _zoom,
+                                      pan: _pan,
+                                      annotations: _annotations,
+                                      selectedEntityId: _selectedEntityId,
+                                      selectedEntityIds: {
+                                        ..._lengthEntityMeasurements.keys,
+                                        ..._areaEntityMeasurements.keys,
+                                        ..._lineIntersectionEntityIds,
+                                        ..._radialClearanceEntityIds,
+                                      },
+                                      subtractedEntityIds: Set.of(
+                                        _subtractedAreaEntityIds,
+                                      ),
+                                      measurementPoints: List.of(
+                                        _measurementPoints,
+                                      ),
+                                      measurementIntersectionPoints: [
+                                        if (_tool ==
+                                                ViewerTool
+                                                    .locatePolylineStation &&
+                                            _stationStakeoutMeasurement != null)
+                                          _stationStakeoutMeasurement!
+                                              .targetPoint,
+                                        if (_tool ==
+                                                ViewerTool.locatePolarPoint &&
+                                            _polarStakeoutMeasurement != null &&
+                                            _measurementPoints.length == 2)
+                                          _measurementPoints.last,
+                                        if (_tool ==
+                                                ViewerTool.locateTwoDistances &&
+                                            _twoDistanceLocation != null)
+                                          ..._twoDistanceLocation!.solutions,
+                                        if (_tool ==
+                                                ViewerTool.dividePolyline &&
+                                            _polylineDivisionMeasurement !=
+                                                null)
+                                          ..._polylineDivisionMeasurement!
+                                              .divisionPoints,
+                                        for (
+                                          var index = 0;
+                                          index < _measurementPoints.length &&
+                                              index <
+                                                  _areaPointIntersections
+                                                      .length;
+                                          index++
+                                        )
+                                          if (_areaPointIntersections[index])
+                                            _measurementPoints[index],
+                                      ],
+                                      indexedMeasurementPoints:
+                                          _tool == ViewerTool.collectCoordinates
+                                          ? List.of(_coordinateCollectionPoints)
+                                          : areaBoundaryEdges != null
+                                          ? List.of(areaBoundaryPoints)
+                                          : const [],
+                                      measurementCentroid: switch (_tool) {
+                                        ViewerTool.measureArea =>
+                                          _measurementCentroid,
+                                        ViewerTool.measureRectangle
+                                            when _measurementPoints.length ==
+                                                2 =>
+                                          cadRectangleMeasurement2D(
+                                            _measurementPoints[0],
+                                            _measurementPoints[1],
+                                          )?.center,
+                                        ViewerTool.measureOrientedRectangle
+                                            when _measurementPoints.length ==
+                                                3 =>
+                                          cadOrientedRectangleMeasurement2D(
+                                            _measurementPoints[0],
+                                            _measurementPoints[1],
+                                            _measurementPoints[2],
+                                          )?.center,
+                                        _ => null,
+                                      },
+                                      measurementClosed:
+                                          _tool == ViewerTool.measureArea,
+                                      measurementRectangle:
+                                          _tool == ViewerTool.measureRectangle,
+                                      measurementOrientedRectangle:
+                                          _tool ==
+                                          ViewerTool.measureOrientedRectangle,
+                                      measurementCircle3Point:
+                                          _tool ==
+                                          ViewerTool.measureCircle3Point,
+                                      measurementArc3Point:
+                                          _tool == ViewerTool.measureArc3Point,
+                                      measurementPointLineOffset:
+                                          _tool ==
+                                          ViewerTool.measurePointLineOffset,
+                                      measurementLineIntersection:
+                                          _tool ==
+                                          ViewerTool.measureLineIntersection,
+                                      measurementParallelLineSpacing:
+                                          _tool ==
+                                          ViewerTool.measureParallelLineSpacing,
+                                      measurementSegmentClearance:
+                                          _tool ==
+                                          ViewerTool.measureSegmentClearance,
+                                      measurementMidpoint:
+                                          _tool == ViewerTool.measure,
+                                      measurementAngle:
+                                          _tool == ViewerTool.measureAngle,
+                                      yaw: _yaw,
+                                      pitch: _pitch,
+                                      selectedMeshId: _selectedMeshId,
+                                      measurement3DPoints: List.of(
+                                        _measurement3DPoints,
+                                      ),
+                                      measurement3DFaces: [
+                                        for (final face in _measurement3DFaces)
+                                          face.hit,
+                                      ],
+                                      measurement3DAngle:
+                                          _document.sceneKind == 'three_d' &&
+                                          _tool == ViewerTool.measureAngle,
+                                      coordinateOrigin2D: _localOrigin2D,
+                                      coordinateXAxis2D: _localFrame2D?.xAxis,
+                                      coordinateOrigin3D: _localOrigin3D,
                                     ),
-                                    measurementPoints: List.of(
-                                      _measurementPoints,
-                                    ),
-                                    measurementIntersectionPoints: [
-                                      if (_tool ==
-                                              ViewerTool
-                                                  .locatePolylineStation &&
-                                          _stationStakeoutMeasurement != null)
-                                        _stationStakeoutMeasurement!
-                                            .targetPoint,
-                                      if (_tool ==
-                                              ViewerTool.locatePolarPoint &&
-                                          _polarStakeoutMeasurement != null &&
-                                          _measurementPoints.length == 2)
-                                        _measurementPoints.last,
-                                      if (_tool ==
-                                              ViewerTool.locateTwoDistances &&
-                                          _twoDistanceLocation != null)
-                                        ..._twoDistanceLocation!.solutions,
-                                      if (_tool == ViewerTool.dividePolyline &&
-                                          _polylineDivisionMeasurement != null)
-                                        ..._polylineDivisionMeasurement!
-                                            .divisionPoints,
-                                      for (
-                                        var index = 0;
-                                        index < _measurementPoints.length &&
-                                            index <
-                                                _areaPointIntersections.length;
-                                        index++
-                                      )
-                                        if (_areaPointIntersections[index])
-                                          _measurementPoints[index],
-                                    ],
-                                    indexedMeasurementPoints:
-                                        _tool == ViewerTool.collectCoordinates
-                                        ? List.of(_coordinateCollectionPoints)
-                                        : areaBoundaryEdges != null
-                                        ? List.of(areaBoundaryPoints)
-                                        : const [],
-                                    measurementCentroid: switch (_tool) {
-                                      ViewerTool.measureArea =>
-                                        _measurementCentroid,
-                                      ViewerTool.measureRectangle
-                                          when _measurementPoints.length == 2 =>
-                                        cadRectangleMeasurement2D(
-                                          _measurementPoints[0],
-                                          _measurementPoints[1],
-                                        )?.center,
-                                      ViewerTool.measureOrientedRectangle
-                                          when _measurementPoints.length == 3 =>
-                                        cadOrientedRectangleMeasurement2D(
-                                          _measurementPoints[0],
-                                          _measurementPoints[1],
-                                          _measurementPoints[2],
-                                        )?.center,
-                                      _ => null,
-                                    },
-                                    measurementClosed:
-                                        _tool == ViewerTool.measureArea,
-                                    measurementRectangle:
-                                        _tool == ViewerTool.measureRectangle,
-                                    measurementOrientedRectangle:
-                                        _tool ==
-                                        ViewerTool.measureOrientedRectangle,
-                                    measurementCircle3Point:
-                                        _tool == ViewerTool.measureCircle3Point,
-                                    measurementArc3Point:
-                                        _tool == ViewerTool.measureArc3Point,
-                                    measurementPointLineOffset:
-                                        _tool ==
-                                        ViewerTool.measurePointLineOffset,
-                                    measurementLineIntersection:
-                                        _tool ==
-                                        ViewerTool.measureLineIntersection,
-                                    measurementParallelLineSpacing:
-                                        _tool ==
-                                        ViewerTool.measureParallelLineSpacing,
-                                    measurementSegmentClearance:
-                                        _tool ==
-                                        ViewerTool.measureSegmentClearance,
-                                    measurementMidpoint:
-                                        _tool == ViewerTool.measure,
-                                    measurementAngle:
-                                        _tool == ViewerTool.measureAngle,
-                                    yaw: _yaw,
-                                    pitch: _pitch,
-                                    selectedMeshId: _selectedMeshId,
-                                    measurement3DPoints: List.of(
-                                      _measurement3DPoints,
-                                    ),
-                                    measurement3DFaces: [
-                                      for (final face in _measurement3DFaces)
-                                        face.hit,
-                                    ],
-                                    measurement3DAngle:
-                                        _document.sceneKind == 'three_d' &&
-                                        _tool == ViewerTool.measureAngle,
-                                    coordinateOrigin2D: _localOrigin2D,
-                                    coordinateXAxis2D: _localFrame2D?.xAxis,
-                                    coordinateOrigin3D: _localOrigin3D,
                                   ),
                                 ),
                               ),

@@ -2,7 +2,9 @@
 //! the way a plot of the drawing is split into sheets.
 
 use crate::{Bounds2, Entity2DGeometry, Point2, Scene2D};
+use rstar::{RTree, RTreeObject, AABB};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// One sheet: the outer border rectangle of a drawing frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,7 +30,9 @@ const ISO_A: [(&str, f64, f64); 5] = [
 
 /// Rectangle of an axis-aligned closed polyline with four corners.
 fn rectangle(points: &[Point2], closed: bool) -> Option<Bounds2> {
-    let mut corners = points.to_vec();
+    // Most CAD polylines are not frame candidates. Never clone their complete
+    // vertex arrays merely to reject them by length.
+    let mut corners = points;
     if corners.len() == 5 {
         let (first, last) = (corners[0], corners[4]);
         let size = corners
@@ -38,7 +42,7 @@ fn rectangle(points: &[Point2], closed: bool) -> Option<Bounds2> {
         if (first.x - last.x).abs() > size * 1e-9 || (first.y - last.y).abs() > size * 1e-9 {
             return None;
         }
-        corners.pop();
+        corners = &corners[..4];
     } else if corners.len() != 4 || !closed {
         return None;
     }
@@ -76,6 +80,26 @@ fn rectangle(points: &[Point2], closed: bool) -> Option<Bounds2> {
         min: Point2::new(min_x, min_y),
         max: Point2::new(max_x, max_y),
     })
+}
+
+#[derive(Clone, Copy)]
+struct FrameBounds(Bounds2);
+impl RTreeObject for FrameBounds {
+    type Envelope = AABB<[f64; 2]>;
+    fn envelope(&self) -> Self::Envelope {
+        AABB::from_corners([self.0.min.x, self.0.min.y], [self.0.max.x, self.0.max.y])
+    }
+}
+
+fn potential_children<'a>(
+    tree: &'a RTree<FrameBounds>,
+    bounds: &Bounds2,
+) -> impl Iterator<Item = &'a FrameBounds> {
+    let tolerance = width(bounds).max(height(bounds)) * 1e-6;
+    tree.locate_in_envelope_intersecting(&AABB::from_corners(
+        [bounds.min.x - tolerance, bounds.min.y - tolerance],
+        [bounds.max.x + tolerance, bounds.max.y + tolerance],
+    ))
 }
 
 fn width(bounds: &Bounds2) -> f64 {
@@ -145,6 +169,7 @@ fn paper_size(bounds: &Bounds2) -> Option<(String, f64)> {
 /// usual title-block outer/inner border pair). Only outermost frames are
 /// returned, ordered in rows from the top and left to right within a row.
 pub fn detect_drawing_frames(scene: &Scene2D) -> Vec<DrawingFrame> {
+    let mut seen = HashSet::new();
     let rectangles = scene
         .entities
         .iter()
@@ -152,12 +177,24 @@ pub fn detect_drawing_frames(scene: &Scene2D) -> Vec<DrawingFrame> {
             Entity2DGeometry::Polyline { points, closed } => rectangle(points, *closed),
             _ => None,
         })
+        .filter(|bounds| {
+            let key = [bounds.min.x, bounds.min.y, bounds.max.x, bounds.max.y].map(|value| {
+                if value == 0.0 {
+                    0
+                } else {
+                    value.to_bits()
+                }
+            });
+            seen.insert(key)
+        })
         .collect::<Vec<_>>();
+    let index = RTree::bulk_load(rectangles.iter().copied().map(FrameBounds).collect());
     let mut frames = rectangles
         .iter()
         .filter(|outer| paper_proportions(outer))
         .filter(|outer| {
-            rectangles.iter().any(|inner| {
+            potential_children(&index, outer).any(|candidate| {
+                let inner = &candidate.0;
                 inner != *outer
                     && contains(outer, inner)
                     && width(inner) >= 0.8 * width(outer)
@@ -168,12 +205,12 @@ pub fn detect_drawing_frames(scene: &Scene2D) -> Vec<DrawingFrame> {
         .cloned()
         .collect::<Vec<_>>();
     frames.dedup_by(|a, b| a == b);
+    let frame_index = RTree::bulk_load(frames.iter().copied().map(FrameBounds).collect());
     let outermost = frames
         .iter()
         .filter(|frame| {
-            !frames
-                .iter()
-                .any(|other| other != *frame && contains(other, frame))
+            !potential_children(&frame_index, frame)
+                .any(|other| other.0 != **frame && contains(&other.0, frame))
         })
         .cloned()
         .collect::<Vec<_>>();

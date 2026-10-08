@@ -13,6 +13,7 @@ use acadrust::entities::{
 use acadrust::tables::BlockRecord;
 use acadrust::DxfWriter;
 use acadrust::{CadDocument, DwgWriter, EntityType, Handle, Line, Vector2, Vector3};
+use cad_core::TextGeometry2D;
 use cad_core::{CancellationToken, Entity2DGeometry, FormatAdapter, Point2, SceneDocument};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
@@ -273,7 +274,10 @@ fn sample(document: SceneDocument) -> (Vec<Vec<Point2>>, Vec<(String, Point2)>) 
                 }
                 paths.push(arc(center, radius, start_angle, sweep));
             }
-            Entity2DGeometry::Text { origin, value, .. } => labels.push((value, origin)),
+            Entity2DGeometry::Text(text_geometry) => {
+                let TextGeometry2D { origin, value, .. } = *text_geometry;
+                labels.push((value, origin))
+            }
         }
     }
     (paths, labels)

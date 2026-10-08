@@ -12,6 +12,7 @@ use crate::text_normalization::{
     mtext_line_spacing, parse_mtext, parse_single_line_text, SourceMTextColumns,
 };
 use crate::units::autocad_unit_id;
+use cad_core::TextGeometry2D;
 use cad_core::{
     fingerprint, CadError, CancellationToken, DiagnosticSeverity, DocumentMetadata, Entity2D,
     Entity2DGeometry, FormatAdapter, FormatCapabilities, FormatDiagnostic, FormatId, Layer,
@@ -64,40 +65,84 @@ impl FormatAdapter for DxfAdapter {
     ) -> Result<OpenedDocument, CadError> {
         cancel.check()?;
         let (encoding, mut unknown_code_page) = ascii_dxf_encoding(bytes, cancel)?;
-        let drawing = Drawing::load_with_encoding(&mut Cursor::new(bytes), encoding)
+        // Large drawings must not retain dxf's heavyweight Entity enum for
+        // every model entity alongside the normalized scene. First retain only
+        // metadata/definitions, then normalize the same fully assembled reader
+        // stream. Two passes also handle non-canonical section ordering safely.
+        let stream_entities = bytes.len() >= 8 * 1024 * 1024 && !bytes.starts_with(b"AutoCAD DXB");
+        // The metadata pass of a large text DXF reads a copy without its
+        // ENTITIES sections: tokenizing and discarding every model entity
+        // there cost about as much as the entity pass itself. Top-level IDs
+        // are then counted by the entity pass, and block-expanded entities
+        // are renumbered after it to the same IDs as before.
+        let sections = match stream_entities
+            .then(|| dxf_raw::entity_sections(bytes, encoding, cancel))
+            .flatten()
+        {
+            Some(sections) => Some(sections?),
+            None => None,
+        };
+        let metadata_bytes = match &sections {
+            Some(sections) if !sections.ranges.is_empty() => {
+                let ranges = &sections.ranges;
+                let mut kept = Vec::with_capacity(
+                    bytes.len() - ranges.iter().map(|range| range.len()).sum::<usize>(),
+                );
+                let mut position = 0;
+                for range in ranges {
+                    kept.extend_from_slice(&bytes[position..range.start]);
+                    position = range.end;
+                }
+                kept.extend_from_slice(&bytes[position..]);
+                std::borrow::Cow::Owned(kept)
+            }
+            _ => std::borrow::Cow::Borrowed(bytes),
+        };
+        let deferred_ids = sections.is_some();
+        let mut top_level = 0;
+        let loaded = if stream_entities {
+            Drawing::load_with_entity_sink(
+                &mut Cursor::new(&*metadata_bytes),
+                encoding,
+                &mut |_| {
+                    top_level += 1;
+                    if top_level > MAX_DXF_ENTITIES
+                        || (top_level % 4096 == 0 && cancel.is_cancelled())
+                    {
+                        return Err(dxf::DxfError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "DXF entity limit or cancellation",
+                        )));
+                    }
+                    if top_level % 4096 == 0 {
+                        if let Some(sink) = sink.as_deref_mut() {
+                            sink.progress(0.3 * (top_level as f32 / (top_level + 4096) as f32));
+                        }
+                    }
+                    Ok(())
+                },
+            )
+        } else {
+            Drawing::load_with_encoding(&mut Cursor::new(bytes), encoding)
+        };
+        drop(metadata_bytes);
+        cancel.check()?;
+        if top_level > MAX_DXF_ENTITIES {
+            return Err(CadError::ResourceLimit(
+                "DXF entity count exceeds 5,000,000".to_owned(),
+            ));
+        }
+        let drawing = loaded
             .map_err(|error| CadError::InvalidDocument(format!("DXF parse failed: {error}")))?;
+        if !stream_entities {
+            top_level = drawing.entities().count();
+        }
         if drawing.header.version < dxf::enums::AcadVersion::R2007
             && dxf::code_page::encoding_from_code_page(&drawing.header.drawing_code_page).is_none()
         {
             unknown_code_page = Some(drawing.header.drawing_code_page.clone());
         }
 
-        let mut layer_ids = BTreeMap::new();
-        let mut layers = Vec::new();
-        for (index, layer) in drawing.layers().enumerate() {
-            let id = index as u64 + 1;
-            layer_ids.insert(layer.name.clone(), id);
-            layers.push(Layer {
-                id,
-                name: layer.name.clone(),
-                visible: layer.is_layer_on,
-                color_argb: layer.color_24_bit.map_or_else(
-                    || aci_color(layer.color.index().unwrap_or(7)),
-                    |rgb| 0xff000000 | (rgb as u32 & 0xffffff),
-                ),
-            });
-        }
-        if layers.is_empty() {
-            layer_ids.insert("0".to_owned(), 1);
-            layers.push(Layer {
-                id: 1,
-                name: "0".to_owned(),
-                visible: true,
-                color_argb: 0xffe5e7eb,
-            });
-        }
-
-        let top_level = drawing.entities().count();
         if top_level > MAX_DXF_ENTITIES {
             return Err(CadError::ResourceLimit(
                 "DXF entity count exceeds 5,000,000".to_owned(),
@@ -109,49 +154,38 @@ impl FormatAdapter for DxfAdapter {
             drawing.header.version >= dxf::enums::AcadVersion::R2010,
             cancel,
         )?;
-        let mut normalizer = DxfNormalizer {
-            drawing: &drawing,
-            blocks: drawing
-                .blocks()
-                .map(|block| (block.name.to_uppercase(), block))
-                .collect(),
+        let parallel = sections
+            .as_ref()
+            .and_then(|sections| parallel_plan(bytes, sections, &drawing));
+        let pass = EntityPass {
+            parallel,
+            bytes,
+            encoding,
             raw: &raw,
-            block_names: drawing
-                .block_records()
-                .map(|record| (record.handle.0, record.name.clone()))
-                .collect(),
-            style_names: drawing
-                .styles()
-                .map(|style| (style.handle.0, style.name.clone()))
-                .collect(),
-            layer_ids: &layer_ids,
-            layers: &layers,
-            entities: Vec::new(),
-            next_id: top_level as u64 + 1,
-            unsupported: BTreeMap::new(),
+            stream_entities,
+            deferred_ids,
+            top_level,
+            progress_total: match &sections {
+                Some(sections) => sections.estimate,
+                None => top_level,
+            },
             cancel,
         };
-        for (index, entity) in drawing.entities().enumerate() {
-            if index % 4096 == 0 {
-                cancel.check()?;
-                if let Some(sink) = sink.as_deref_mut() {
-                    sink.progress((index as f32 / (index + 4096) as f32).min(0.9));
-                }
+        let mut normalized = pass.run(&drawing, &mut sink)?;
+        if let Some(full) = normalized.full_drawing.take() {
+            // Entities can add layers, linetypes and text styles that their
+            // tables lack, which the metadata pass did not see. Normalize
+            // again against the complete tables, as the reader had them.
+            if !same_tables(&drawing, &full, &normalized.layers) {
+                normalized = pass.run(&full, &mut sink)?;
             }
-            normalizer.append(
-                entity,
-                Some(index as u64 + 1),
-                &Affine2::IDENTITY,
-                None,
-                &mut Vec::new(),
-            )?;
         }
-        normalizer.append_raw(None, &Affine2::IDENTITY, None, &mut Vec::new())?;
-        let DxfNormalizer {
+        let Normalized {
+            layers,
             entities,
             mut unsupported,
             ..
-        } = normalizer;
+        } = normalized;
         for (kind, count) in &raw.discarded {
             *unsupported.entry(kind.clone()).or_default() += count;
         }
@@ -337,7 +371,7 @@ fn text_geometry(text: &dxf::entities::Text, drawing: &Drawing) -> Option<Entity
     } else {
         &text.location
     };
-    Some(Entity2DGeometry::Text {
+    Some(Entity2DGeometry::Text(Box::new(TextGeometry2D {
         origin: world_point(axes, [origin.x, origin.y, origin.z]),
         value: parsed.value,
         height: positive(text.text_height, style.map_or(1.0, |s| s.text_height)),
@@ -389,11 +423,12 @@ fn text_geometry(text: &dxf::entities::Text, drawing: &Drawing) -> Option<Entity
                 &style.primary_font_file_name,
                 &style.big_font_file_name,
             )
+            .map(Box::new)
         }),
         plane: plane(axes),
         text_runs: parsed.runs,
         text_warnings: parsed.warnings,
-    })
+    })))
 }
 
 fn mtext_geometry(
@@ -507,7 +542,7 @@ fn mtext_geometry(
         } else {
             text.reference_rectangle_width
         };
-    Some(Entity2DGeometry::Text {
+    Some(Entity2DGeometry::Text(Box::new(TextGeometry2D {
         origin: point2(text.insertion_point.x, text.insertion_point.y),
         value: parsed.value,
         height,
@@ -534,8 +569,8 @@ fn mtext_geometry(
         wrap_width: (paragraph_width.is_finite() && paragraph_width > 0.0)
             .then_some(paragraph_width),
         line_spacing: Some(line_spacing),
-        columns,
-        background,
+        columns: columns.map(Box::new),
+        background: background.map(Box::new),
         mirrored_x: style.is_some_and(|s| s.text_generation_flags & 2 != 0),
         mirrored_y: style.is_some_and(|s| s.text_generation_flags & 4 != 0),
         font_family: font_family(style),
@@ -544,11 +579,12 @@ fn mtext_geometry(
                 &style.primary_font_file_name,
                 &style.big_font_file_name,
             )
+            .map(Box::new)
         }),
         plane: if default_plane { None } else { plane(axes) },
         text_runs: parsed.runs,
         text_warnings: parsed.warnings,
-    })
+    })))
 }
 
 fn raw_color(aci: Option<i16>) -> dxf::Color {
@@ -599,9 +635,522 @@ fn mleader_mtext(
 }
 
 const MAX_DXF_ENTITIES: usize = 5_000_000;
+/// Temporary IDs of block-expanded entities while the top-level count of a
+/// streamed DXF is still unknown; far above any top-level ID.
+const DEFERRED_ID_BASE: u64 = 1 << 40;
 const MAX_DXF_BLOCK_DEPTH: usize = 64;
 
 /// Encoding of string values after the header, as resolved by the typed reader.
+/// Entities after normalization against one metadata drawing.
+struct Normalized {
+    layers: Vec<Layer>,
+    entities: Vec<Entity2D>,
+    unsupported: BTreeMap<String, u64>,
+    /// The streamed reader's drawing when the metadata pass skipped the
+    /// ENTITIES sections; its tables include entries entities created.
+    full_drawing: Option<Drawing>,
+}
+
+/// The ENTITIES body of a canonical text DXF split for parallel reading.
+struct ParallelPlan<'a> {
+    /// The HEADER section (version and code page for the reader).
+    header: &'a [u8],
+    /// Entity groups, cut at top-level entity starts.
+    chunks: Vec<&'a [u8]>,
+}
+
+/// One worker's normalized entities with temporary IDs and layers.
+struct ChunkResult {
+    entities: Vec<Entity2D>,
+    /// Layers the chunk started with (layer IDs up to this are shared).
+    base_layers: usize,
+    top_level: usize,
+    expanded: u64,
+    /// Layers added for names only this chunk's entities reference.
+    added_layers: Vec<String>,
+    unsupported: BTreeMap<String, u64>,
+    /// Text style names the chunk's entities reference.
+    styles: Vec<String>,
+}
+
+/// The entity pass of a DXF open, repeatable with different metadata.
+struct EntityPass<'a> {
+    parallel: Option<ParallelPlan<'a>>,
+    bytes: &'a [u8],
+    encoding: &'static encoding_rs::Encoding,
+    raw: &'a dxf_raw::RawScan,
+    stream_entities: bool,
+    deferred_ids: bool,
+    top_level: usize,
+    progress_total: usize,
+    cancel: &'a CancellationToken,
+}
+
+impl EntityPass<'_> {
+    fn run(
+        &self,
+        drawing: &Drawing,
+        sink: &mut Option<&mut dyn SceneSink>,
+    ) -> Result<Normalized, CadError> {
+        let EntityPass {
+            bytes,
+            encoding,
+            raw,
+            stream_entities,
+            deferred_ids,
+            mut top_level,
+            progress_total,
+            cancel,
+            ..
+        } = *self;
+        let mut layer_ids = BTreeMap::new();
+        let mut layers = Vec::new();
+        for layer in drawing.layers() {
+            add_layer(&mut layer_ids, &mut layers, layer);
+        }
+        // Without its entities the metadata drawing may still gain layers
+        // that only entities reference; the fallback layer waits for them.
+        if layers.is_empty() && !deferred_ids {
+            push_fallback_layer(&mut layer_ids, &mut layers);
+        }
+
+        let parallel = match (&self.parallel, deferred_ids) {
+            (Some(plan), true) => self.read_chunks(plan, drawing, &layer_ids, &layers, sink)?,
+            _ => None,
+        };
+        let mut normalizer = DxfNormalizer {
+            drawing,
+            blocks: drawing
+                .blocks()
+                .map(|block| (block.name.to_uppercase(), block))
+                .collect(),
+            raw,
+            block_names: drawing
+                .block_records()
+                .map(|record| (record.handle.0, record.name.clone()))
+                .collect(),
+            style_names: drawing
+                .styles()
+                .map(|style| (style.handle.0, style.name.clone()))
+                .collect(),
+            layer_ids,
+            layers,
+            entities: if stream_entities {
+                Vec::with_capacity(progress_total.min(1_000_000))
+            } else {
+                Vec::new()
+            },
+            next_id: if deferred_ids {
+                DEFERRED_ID_BASE
+            } else {
+                top_level as u64 + 1
+            },
+            unsupported: BTreeMap::new(),
+            cancel,
+        };
+        let mut append_entity =
+            |index: usize, entity: &dxf::entities::Entity| -> Result<(), CadError> {
+                if index % 4096 == 0 {
+                    cancel.check()?;
+                    if let Some(sink) = sink.as_deref_mut() {
+                        sink.progress(if stream_entities {
+                            0.3 + 0.6 * (index as f32 / progress_total.max(1) as f32).min(1.0)
+                        } else {
+                            (index as f32 / (index + 4096) as f32).min(0.9)
+                        });
+                    }
+                }
+                if deferred_ids {
+                    // As the reader does when it adds each top-level entity.
+                    normalizer.ensure_layer(&entity.common.layer);
+                }
+                normalizer.append(
+                    entity,
+                    Some(index as u64 + 1),
+                    &Affine2::IDENTITY,
+                    None,
+                    &mut Vec::new(),
+                )?;
+                Ok(())
+            };
+        let mut full_drawing = None;
+        if let Some(chunks) = parallel {
+            // Concatenate in source order, renumbering each chunk's IDs and
+            // added layers to what one sequential pass assigns.
+            top_level = merge_chunks(&mut normalizer, chunks);
+        } else if stream_entities {
+            let mut index = 0;
+            let mut append_error = None;
+            let result =
+                Drawing::load_with_entity_sink(&mut Cursor::new(bytes), encoding, &mut |entity| {
+                    if index >= MAX_DXF_ENTITIES {
+                        append_error = Some(CadError::ResourceLimit(
+                            "DXF entity count exceeds 5,000,000".to_owned(),
+                        ));
+                        return Err(dxf::DxfError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "DXF entity limit",
+                        )));
+                    }
+                    let result = append_entity(index, &entity);
+                    index += 1;
+                    if let Err(error) = result {
+                        append_error = Some(error);
+                        return Err(dxf::DxfError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "DXF normalization stopped",
+                        )));
+                    }
+                    Ok(())
+                });
+            if let Some(error) = append_error {
+                return Err(error);
+            }
+            full_drawing = Some(result.map_err(|error| {
+                CadError::InvalidDocument(format!("DXF stream failed: {error}"))
+            })?);
+            if deferred_ids {
+                top_level = index;
+            }
+        } else {
+            for (index, entity) in drawing.entities().enumerate() {
+                append_entity(index, entity)?;
+            }
+        }
+        normalizer.append_raw(None, &Affine2::IDENTITY, None, &mut Vec::new())?;
+        let DxfNormalizer {
+            mut entities,
+            unsupported,
+            mut layer_ids,
+            mut layers,
+            ..
+        } = normalizer;
+        if layers.is_empty() {
+            push_fallback_layer(&mut layer_ids, &mut layers);
+        }
+        if deferred_ids {
+            for entity in &mut entities {
+                if entity.id >= DEFERRED_ID_BASE {
+                    entity.id = entity.id - DEFERRED_ID_BASE + top_level as u64 + 1;
+                }
+            }
+        }
+        Ok(Normalized {
+            layers,
+            entities,
+            unsupported,
+            full_drawing: full_drawing.filter(|_| deferred_ids),
+        })
+    }
+}
+
+impl EntityPass<'_> {
+    /// Reads and normalizes [plan]'s chunks on worker threads. None when
+    /// the result could differ from one sequential pass (a chunk failed, or
+    /// entities reference text styles the tables lack, which the reader
+    /// would add); the caller then reads sequentially.
+    fn read_chunks(
+        &self,
+        plan: &ParallelPlan<'_>,
+        drawing: &Drawing,
+        layer_ids: &BTreeMap<String, u64>,
+        layers: &[Layer],
+        sink: &mut Option<&mut dyn SceneSink>,
+    ) -> Result<Option<Vec<ChunkResult>>, CadError> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let processed = AtomicUsize::new(0);
+        let results = std::thread::scope(|scope| {
+            let workers = plan
+                .chunks
+                .iter()
+                .map(|chunk| {
+                    let processed = &processed;
+                    scope.spawn(move || {
+                        self.read_chunk(plan.header, chunk, drawing, layer_ids, layers, processed)
+                    })
+                })
+                .collect::<Vec<_>>();
+            while !workers.iter().all(|worker| worker.is_finished()) {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                if let Some(sink) = sink.as_deref_mut() {
+                    let done = processed.load(Ordering::Relaxed) as f32;
+                    sink.progress(0.3 + 0.6 * (done / self.progress_total.max(1) as f32).min(1.0));
+                }
+            }
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap_or(Ok(None)))
+                .collect::<Vec<_>>()
+        });
+        let mut chunks = Vec::with_capacity(results.len());
+        for result in results {
+            match result? {
+                Some(chunk) => chunks.push(chunk),
+                None => return Ok(None),
+            }
+        }
+        let declared = drawing
+            .styles()
+            .map(|style| style.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        if chunks
+            .iter()
+            .flat_map(|chunk| &chunk.styles)
+            .any(|name| !declared.contains(name.as_str()))
+        {
+            return Ok(None);
+        }
+        if chunks.iter().map(|chunk| chunk.top_level).sum::<usize>() > MAX_DXF_ENTITIES {
+            return Err(CadError::ResourceLimit(
+                "DXF entity count exceeds 5,000,000".to_owned(),
+            ));
+        }
+        Ok(Some(chunks))
+    }
+
+    fn read_chunk(
+        &self,
+        header: &[u8],
+        chunk: &[u8],
+        drawing: &Drawing,
+        layer_ids: &BTreeMap<String, u64>,
+        layers: &[Layer],
+        processed: &std::sync::atomic::AtomicUsize,
+    ) -> Result<Option<ChunkResult>, CadError> {
+        // The reader copies its input once; chaining avoids another copy.
+        use std::io::Read;
+        let mut source = header
+            .chain(&b"0\nSECTION\n2\nENTITIES\n"[..])
+            .chain(chunk)
+            .chain(&b"0\nENDSEC\n0\nEOF\n"[..]);
+        let mut normalizer = DxfNormalizer {
+            drawing,
+            blocks: drawing
+                .blocks()
+                .map(|block| (block.name.to_uppercase(), block))
+                .collect(),
+            raw: self.raw,
+            block_names: drawing
+                .block_records()
+                .map(|record| (record.handle.0, record.name.clone()))
+                .collect(),
+            style_names: drawing
+                .styles()
+                .map(|style| (style.handle.0, style.name.clone()))
+                .collect(),
+            layer_ids: layer_ids.clone(),
+            layers: layers.to_vec(),
+            entities: Vec::new(),
+            next_id: DEFERRED_ID_BASE,
+            unsupported: BTreeMap::new(),
+            cancel: self.cancel,
+        };
+        // Without a layer table, a layer name nobody added resolves to layer
+        // 1: in one pass the first layer the first chunk adds. A placeholder
+        // holds that place here and is mapped to layer 1 when merging.
+        if normalizer.layers.is_empty() {
+            add_layer(
+                &mut normalizer.layer_ids,
+                &mut normalizer.layers,
+                &dxf::tables::Layer {
+                    name: "\0".to_owned(),
+                    ..Default::default()
+                },
+            );
+        }
+        let base_layers = normalizer.layers.len();
+        let mut index = 0usize;
+        let mut append_error = None;
+        let read = Drawing::load_with_entity_sink(&mut source, self.encoding, &mut |entity| {
+            let result = if index >= MAX_DXF_ENTITIES {
+                Err(CadError::ResourceLimit(
+                    "DXF entity count exceeds 5,000,000".to_owned(),
+                ))
+            } else {
+                normalizer.ensure_layer(&entity.common.layer);
+                normalizer.append(
+                    &entity,
+                    Some(index as u64 + 1),
+                    &Affine2::IDENTITY,
+                    None,
+                    &mut Vec::new(),
+                )
+            };
+            index += 1;
+            if index % 4096 == 0 {
+                processed.fetch_add(4096, std::sync::atomic::Ordering::Relaxed);
+            }
+            result.map_err(|error| {
+                append_error = Some(error);
+                dxf::DxfError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "DXF normalization stopped",
+                ))
+            })
+        });
+        if let Some(error) = append_error {
+            return Err(error);
+        }
+        let Ok(read) = read else {
+            return Ok(None);
+        };
+        let DxfNormalizer {
+            entities,
+            next_id,
+            unsupported,
+            layers: chunk_layers,
+            ..
+        } = normalizer;
+        Ok(Some(ChunkResult {
+            entities,
+            base_layers,
+            top_level: index,
+            expanded: next_id - DEFERRED_ID_BASE,
+            added_layers: chunk_layers[base_layers..]
+                .iter()
+                .map(|layer| layer.name.clone())
+                .collect(),
+            unsupported,
+            styles: read.styles().map(|style| style.name.clone()).collect(),
+        }))
+    }
+}
+
+/// Appends [chunks] to [normalizer] in order with the IDs and layers one
+/// sequential pass gives, and returns the number of top-level entities.
+fn merge_chunks(normalizer: &mut DxfNormalizer<'_>, chunks: Vec<ChunkResult>) -> usize {
+    let total = chunks
+        .iter()
+        .map(|chunk| chunk.entities.len())
+        .sum::<usize>();
+    normalizer.entities.reserve(total);
+    let (mut top_offset, mut expanded_offset) = (0u64, 0u64);
+    for chunk in chunks {
+        // Added layers keep the order of first reference across chunks.
+        let mut layer_map = Vec::with_capacity(chunk.added_layers.len());
+        for name in &chunk.added_layers {
+            normalizer.ensure_layer(name);
+            layer_map.push(normalizer.layer_ids[name]);
+        }
+        let base = chunk.base_layers as u64;
+        for mut entity in chunk.entities {
+            if entity.layer_id > base {
+                entity.layer_id = layer_map[(entity.layer_id - base - 1) as usize];
+            }
+            entity.id = if entity.id >= DEFERRED_ID_BASE {
+                entity.id + expanded_offset
+            } else {
+                entity.id + top_offset
+            };
+            normalizer.entities.push(entity);
+        }
+        for (kind, count) in chunk.unsupported {
+            *normalizer.unsupported.entry(kind).or_default() += count;
+        }
+        top_offset += chunk.top_level as u64;
+        expanded_offset += chunk.expanded;
+    }
+    normalizer.next_id = DEFERRED_ID_BASE + expanded_offset;
+    top_offset as usize
+}
+
+/// Splits a canonical text DXF's entities for parallel reading, or None
+/// when it is small, laid out unusually, or has objects that add layers
+/// (their order relative to entity-added layers would differ).
+fn parallel_plan<'a>(
+    bytes: &'a [u8],
+    sections: &dxf_raw::EntitySections,
+    drawing: &Drawing,
+) -> Option<ParallelPlan<'a>> {
+    let body = sections.body.clone()?;
+    let threads = std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(1)
+        .min(8);
+    let count = threads.min(sections.splits.len() + 1);
+    if count < 2
+        || drawing.objects().any(|object| {
+            matches!(
+                object.specific,
+                dxf::objects::ObjectType::LayerFilter(_) | dxf::objects::ObjectType::LayerIndex(_)
+            )
+        })
+    {
+        return None;
+    }
+    let header = sections
+        .header
+        .clone()
+        .map_or(&bytes[..0], |header| &bytes[header]);
+    // Cut at the split points nearest to equal byte shares.
+    let mut cuts = vec![body.start];
+    for part in 1..count {
+        let target = body.start + body.len() * part / count;
+        let cut = sections
+            .splits
+            .iter()
+            .copied()
+            .min_by_key(|split| split.abs_diff(target))?;
+        if cut > *cuts.last()? && cut < body.end {
+            cuts.push(cut);
+        }
+    }
+    cuts.push(body.end);
+    Some(ParallelPlan {
+        header,
+        chunks: cuts.windows(2).map(|cut| &bytes[cut[0]..cut[1]]).collect(),
+    })
+}
+
+fn add_layer(
+    layer_ids: &mut BTreeMap<String, u64>,
+    layers: &mut Vec<Layer>,
+    layer: &dxf::tables::Layer,
+) {
+    let id = layers.len() as u64 + 1;
+    layer_ids.insert(layer.name.clone(), id);
+    layers.push(Layer {
+        id,
+        name: layer.name.clone(),
+        visible: layer.is_layer_on,
+        color_argb: layer.color_24_bit.map_or_else(
+            || aci_color(layer.color.index().unwrap_or(7)),
+            |rgb| 0xff000000 | (rgb as u32 & 0xffffff),
+        ),
+    });
+}
+
+fn push_fallback_layer(layer_ids: &mut BTreeMap<String, u64>, layers: &mut Vec<Layer>) {
+    layer_ids.insert("0".to_owned(), 1);
+    layers.push(Layer {
+        id: 1,
+        name: "0".to_owned(),
+        visible: true,
+        color_argb: 0xffe5e7eb,
+    });
+}
+
+/// Whether a streamed normalization against the metadata drawing [a] equals
+/// one against the complete drawing [b]. Readers only append table entries
+/// for names entities reference: layers are compared as the entity pass
+/// rebuilt them, text styles and blocks directly (style handles are what
+/// MTEXT refers to). Added linetypes have no pattern, exactly like a missing
+/// one, so they cannot change the scene.
+fn same_tables(a: &Drawing, b: &Drawing, layers: &[Layer]) -> bool {
+    let names = || b.layers().map(|layer| layer.name.as_str());
+    (layers.iter().map(|layer| layer.name.as_str()).eq(names())
+        || (names().next().is_none() && layers.len() == 1 && layers[0].color_argb == 0xffe5e7eb))
+        && a.styles()
+            .map(|style| (&style.name, style.handle.0))
+            .eq(b.styles().map(|style| (&style.name, style.handle.0)))
+        && a.block_records()
+            .map(|record| (&record.name, record.handle.0))
+            .eq(b
+                .block_records()
+                .map(|record| (&record.name, record.handle.0)))
+        && a.blocks().count() == b.blocks().count()
+}
+
 fn raw_pair_encoding(drawing: &Drawing) -> &'static encoding_rs::Encoding {
     if drawing.header.version >= dxf::enums::AcadVersion::R2007 {
         encoding_rs::UTF_8
@@ -627,8 +1176,8 @@ struct DxfNormalizer<'a> {
     raw: &'a dxf_raw::RawScan,
     block_names: HashMap<u64, String>,
     style_names: HashMap<u64, String>,
-    layer_ids: &'a BTreeMap<String, u64>,
-    layers: &'a [Layer],
+    layer_ids: BTreeMap<String, u64>,
+    layers: Vec<Layer>,
     entities: Vec<Entity2D>,
     next_id: u64,
     unsupported: BTreeMap<String, u64>,
@@ -636,6 +1185,21 @@ struct DxfNormalizer<'a> {
 }
 
 impl DxfNormalizer<'_> {
+    /// Adds a default layer for [name] when no layer has it, like the
+    /// reader's `ensure_layer_is_present`.
+    fn ensure_layer(&mut self, name: &str) {
+        if !self.layer_ids.contains_key(name) {
+            add_layer(
+                &mut self.layer_ids,
+                &mut self.layers,
+                &dxf::tables::Layer {
+                    name: name.to_owned(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     fn mark_unsupported(&mut self, kind: &str) {
         *self.unsupported.entry(kind.to_owned()).or_default() += 1;
     }
@@ -719,7 +1283,7 @@ impl DxfNormalizer<'_> {
             && !dash.is_empty()
             && !matches!(
                 geometry,
-                Entity2DGeometry::Text { .. } | Entity2DGeometry::Point { .. }
+                Entity2DGeometry::Text(_) | Entity2DGeometry::Point { .. }
             );
         let Some(geometry) = transform_geometry(geometry, transform) else {
             self.mark_unsupported("DEGENERATE_TRANSFORM");
@@ -1527,6 +2091,231 @@ fn aci_color(index: u8) -> u32 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn large_streamed_dxf_preserves_blocks_attributes_hatches_and_text_exactly() {
+        let sources = [block_fixture(), embedded_mtext_fixture(1, 2, false),
+            "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nPOLYLINE\n8\n0\n66\n1\n70\n1\n0\nVERTEX\n8\n0\n10\n1\n20\n2\n0\nVERTEX\n8\n0\n10\n3\n20\n4\n0\nSEQEND\n0\nENDSEC\n0\nEOF\n".to_owned(),
+            // CRLF line endings and multileaders/tables in the raw pass.
+            block_fixture().replace('\n', "\r\n"),
+            leader_fixture(),
+            // Layers and linetypes only entities reference: the reader adds
+            // them while reading ENTITIES, which the metadata pass skips.
+            implicit_tables_fixture(""),
+            // A text style only an entity references: entities are
+            // normalized again against the complete tables.
+            implicit_tables_fixture("7\nNOSTYLE\n")];
+        for source in sources {
+            let expected = DxfAdapter
+                .open(
+                    source.as_bytes(),
+                    "parity.dxf",
+                    None,
+                    &CancellationToken::default(),
+                    None,
+                )
+                .unwrap();
+            let trimmed = source.trim_end();
+            let mut padded = trimmed
+                .strip_suffix("0\nEOF")
+                .or_else(|| trimmed.strip_suffix("0\r\nEOF"))
+                .unwrap()
+                .to_owned();
+            // Ignored comments after all sections trigger the large-file path
+            // without altering source entity order, version or geometry.
+            for _ in 0..9000 {
+                padded.push_str("999\n");
+                padded.push_str(&"x".repeat(1024));
+                padded.push('\n');
+            }
+            padded.push_str("0\nEOF\n");
+            let actual = DxfAdapter
+                .open(
+                    padded.as_bytes(),
+                    "parity.dxf",
+                    None,
+                    &CancellationToken::default(),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(actual.scene).unwrap(),
+                serde_json::to_value(expected.scene).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_value(actual.diagnostics).unwrap(),
+                serde_json::to_value(expected.diagnostics).unwrap()
+            );
+        }
+    }
+
+    fn implicit_tables_fixture(text_style: &str) -> String {
+        format!(
+            "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n0\nENDSEC\n\
+             0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n1\n\
+             0\nLAYER\n2\nDEFINED\n70\n0\n62\n3\n6\nCONTINUOUS\n0\nENDTAB\n0\nENDSEC\n\
+             0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n8\n0\n2\nB\n70\n0\n10\n0\n20\n0\n30\n0\n\
+             0\nLINE\n8\nDEFINED\n10\n0\n20\n0\n30\n0\n11\n1\n21\n0\n31\n0\n0\nENDBLK\n0\nENDSEC\n\
+             0\nSECTION\n2\nENTITIES\n\
+             0\nINSERT\n8\nDEFINED\n2\nB\n10\n5\n20\n5\n30\n0\n\
+             0\nLINE\n8\nONLY_ENTITIES\n62\n256\n10\n0\n20\n0\n30\n0\n11\n1\n21\n1\n31\n0\n\
+             0\nLINE\n8\nDEFINED\n6\nUNDEFINED_LT\n10\n0\n20\n0\n30\n0\n11\n2\n21\n0\n31\n0\n\
+             0\nTEXT\n8\nSECOND_ONLY\n{text_style}10\n0\n20\n0\n30\n0\n40\n2.5\n1\nabc\n\
+             0\nINSERT\n8\nONLY_ENTITIES\n2\nB\n10\n9\n20\n9\n30\n0\n\
+             0\nENDSEC\n0\nEOF\n"
+        )
+    }
+
+    /// A drawing whose ENTITIES section is large enough to be read in
+    /// parallel: layers only entities add (spread over all chunks), block
+    /// references, polylines with vertices and, optionally, a text style the
+    /// tables lack and no layer table at all.
+    fn parallel_fixture(text_style: &str, layer_table: bool) -> String {
+        let mut entities = String::new();
+        for i in 0..9000 {
+            let layer = format!("L{}", (i * 7) % 61);
+            let x = i as f64 * 0.5;
+            entities += &format!(
+                "0\nLINE\n8\n{layer}\n10\n{x}\n20\n0\n30\n0\n11\n{x}\n21\n3\n31\n0\n\
+                 0\nINSERT\n8\nDEFINED\n2\nB\n10\n{x}\n20\n5\n30\n0\n\
+                 0\nPOLYLINE\n8\n{layer}\n66\n1\n70\n0\n\
+                 0\nVERTEX\n8\n{layer}\n10\n{x}\n20\n1\n\
+                 0\nVERTEX\n8\n{layer}\n10\n{x}\n20\n2\n0\nSEQEND\n8\n{layer}\n"
+            );
+            if i % 997 == 0 {
+                entities += &format!(
+                    "0\nTEXT\n8\nT{i}\n{text_style}10\n{x}\n20\n0\n30\n0\n40\n2.5\n1\nabc\n"
+                );
+            }
+        }
+        let layers = if layer_table {
+            "0\nTABLE\n2\nLAYER\n70\n1\n\
+             0\nLAYER\n2\nDEFINED\n70\n0\n62\n3\n6\nCONTINUOUS\n0\nENDTAB\n"
+        } else {
+            ""
+        };
+        let layers = format!(
+            "0\nSECTION\n2\nTABLES\n{layers}0\nTABLE\n2\nSTYLE\n70\n1\n\
+             0\nSTYLE\n2\nSTANDARD\n70\n0\n40\n0\n41\n1\n3\ntxt\n0\nENDTAB\n0\nENDSEC\n"
+        );
+        format!(
+            "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1015\n0\nENDSEC\n{layers}\
+             0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n8\n0\n2\nB\n70\n0\n10\n0\n20\n0\n30\n0\n\
+             0\nLINE\n8\nDEFINED\n10\n0\n20\n0\n30\n0\n11\n1\n21\n0\n31\n0\n0\nENDBLK\n0\nENDSEC\n\
+             0\nSECTION\n2\nENTITIES\n{entities}0\nENDSEC\n0\nEOF\n"
+        )
+    }
+
+    /// Reading a large ENTITIES section on several threads gives exactly
+    /// the scene of one sequential reading.
+    #[test]
+    fn parallel_entity_reading_matches_one_pass() {
+        let cancel = CancellationToken::default();
+        for (style, layer_table) in [("", true), ("", false), ("7\nNOSTYLE\n", true)] {
+            let source = parallel_fixture(style, layer_table);
+            assert!(source.len() < 8 * 1024 * 1024);
+            let expected = DxfAdapter
+                .open(source.as_bytes(), "parallel.dxf", None, &cancel, None)
+                .unwrap();
+            let mut padded = source.strip_suffix("0\nEOF\n").unwrap().to_owned();
+            while padded.len() < 8 * 1024 * 1024 + 4096 {
+                padded.push_str("999\n");
+                padded.push_str(&"x".repeat(1024));
+                padded.push('\n');
+            }
+            padded.push_str("0\nEOF\n");
+            let bytes = padded.as_bytes();
+            let sections = dxf_raw::entity_sections(bytes, encoding_rs::WINDOWS_1252, &cancel)
+                .unwrap()
+                .unwrap();
+            let metadata = Drawing::load(&mut Cursor::new(bytes)).unwrap();
+            if std::thread::available_parallelism().map_or(1, |n| n.get()) > 1 {
+                let plan = parallel_plan(bytes, &sections, &metadata).expect("parallel plan");
+                assert!(plan.chunks.len() > 1);
+                // Chunks start at top-level entities, never inside POLYLINE.
+                for chunk in &plan.chunks {
+                    assert!(!chunk.starts_with(b"0\nVERTEX") && !chunk.starts_with(b"0\nSEQEND"));
+                }
+            }
+            let actual = DxfAdapter
+                .open(bytes, "parallel.dxf", None, &cancel, None)
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(actual.scene).unwrap(),
+                serde_json::to_value(expected.scene).unwrap(),
+                "style {style:?}, layer table {layer_table}"
+            );
+            assert_eq!(
+                serde_json::to_value(actual.diagnostics).unwrap(),
+                serde_json::to_value(expected.diagnostics).unwrap()
+            );
+        }
+    }
+
+    /// The text fast path of the raw scan collects exactly what the generic
+    /// code-pair pass does, and the ENTITIES locator finds every section.
+    #[test]
+    fn raw_text_scan_matches_the_code_pair_scan() {
+        fn summary(scan: &dxf_raw::RawScan) -> String {
+            let mut keys = scan
+                .hatches
+                .keys()
+                .chain(scan.tables.keys())
+                .chain(scan.mleaders.keys())
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys.dedup();
+            let mut out = format!(
+                "{:?} {} {}\n",
+                scan.discarded, scan.unreadable_hatches, scan.unreadable_mleaders
+            );
+            for key in keys {
+                out += &format!(
+                    "{key:?}: {:?} {:?} {:?}\n",
+                    scan.hatches.get(&key),
+                    scan.tables.get(&key),
+                    scan.mleaders.get(&key)
+                );
+            }
+            out
+        }
+        let cancel = CancellationToken::default();
+        for source in [
+            block_fixture(),
+            block_fixture().replace('\n', "\r\n"),
+            format!("\u{feff}{}", leader_fixture()),
+            implicit_tables_fixture(""),
+        ] {
+            let bytes = source.as_bytes();
+            for spline in [false, true] {
+                let fast = dxf_raw::scan_text(bytes, encoding_rs::WINDOWS_1252, spline, &cancel)
+                    .expect("text DXF")
+                    .unwrap();
+                let pairs =
+                    dxf_raw::scan_pairs(bytes, encoding_rs::WINDOWS_1252, spline, &cancel).unwrap();
+                assert_eq!(summary(&fast), summary(&pairs));
+            }
+            let dxf_raw::EntitySections {
+                ranges, estimate, ..
+            } = dxf_raw::entity_sections(bytes, encoding_rs::WINDOWS_1252, &cancel)
+                .unwrap()
+                .unwrap();
+            assert_eq!(ranges.len(), 1);
+            let section = std::str::from_utf8(&bytes[ranges[0].clone()]).unwrap();
+            assert!(section.trim_start_matches('\u{feff}').starts_with("0"));
+            assert!(section.contains("ENTITIES") && section.trim_end().ends_with("ENDSEC"));
+            assert!(estimate > 0);
+        }
+        // Binary DXF keeps the generic reader.
+        assert!(dxf_raw::scan_text(
+            b"AutoCAD Binary DXF\r\n\x1a\0",
+            encoding_rs::WINDOWS_1252,
+            false,
+            &cancel
+        )
+        .is_none());
+    }
+
     // These small color fixtures are encoded directly from authored group pairs,
     // not by either parser's writer, so black/presence tests are independent.
     fn binary_color_fixture(source: &str) -> Vec<u8> {
@@ -1597,7 +2386,10 @@ mod tests {
                     panic!()
                 };
                 assert_eq!(scene.entities.len(), 2);
-                let Entity2DGeometry::Text {
+                let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+                    panic!()
+                };
+                let TextGeometry2D {
                     origin,
                     height,
                     rotation,
@@ -1611,7 +2403,7 @@ mod tests {
                     wrap_width,
                     columns,
                     ..
-                } = &scene.entities[0].geometry
+                } = &**text_geometry
                 else {
                     panic!()
                 };
@@ -1679,13 +2471,16 @@ mod tests {
                 let SceneDocument::TwoD(scene) = opened.scene else {
                     panic!()
                 };
-                let Entity2DGeometry::Text {
+                let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+                    panic!()
+                };
+                let TextGeometry2D {
                     columns,
                     background: Some(mask),
                     text_warnings,
                     value,
                     ..
-                } = &scene.entities[0].geometry
+                } = &**text_geometry
                 else {
                     panic!()
                 };
@@ -1753,7 +2548,10 @@ mod tests {
                 panic!()
             };
             assert_eq!(scene.entities.len(), 2);
-            let Entity2DGeometry::Text {
+            let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+                panic!()
+            };
+            let TextGeometry2D {
                 origin,
                 height,
                 rotation,
@@ -1761,7 +2559,7 @@ mod tests {
                 background: Some(bg),
                 text_warnings,
                 ..
-            } = &scene.entities[0].geometry
+            } = &**text_geometry
             else {
                 panic!()
             };
@@ -1852,11 +2650,14 @@ mod tests {
             assert_eq!(scene.entities[0].color_argb, 0xff000000);
             assert_eq!(scene.entities[1].color_argb, expected_layer);
             for (entity, expected_bg) in scene.entities.iter().zip([0xffffffff, expected_layer]) {
-                let Entity2DGeometry::Text {
+                let Entity2DGeometry::Text(text_geometry) = &entity.geometry else {
+                    panic!()
+                };
+                let TextGeometry2D {
                     background: Some(bg),
                     text_warnings,
                     ..
-                } = &entity.geometry
+                } = &**text_geometry
                 else {
                     panic!()
                 };
@@ -1941,10 +2742,13 @@ mod tests {
         assert_eq!(scene.entities[0].color_argb, 0xff000000);
         assert_eq!(scene.entities[1].color_argb, 0xffff0000);
         assert_eq!(scene.entities[2].color_argb, 0xff000000);
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[1].geometry else {
+            panic!()
+        };
+        let TextGeometry2D {
             background: Some(background),
             ..
-        } = &scene.entities[1].geometry
+        } = &**text_geometry
         else {
             panic!()
         };
@@ -1971,11 +2775,14 @@ mod tests {
                 panic!()
             };
             assert_eq!(scene.entities[0].color_argb, 0xff112233);
-            let Entity2DGeometry::Text {
+            let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+                panic!()
+            };
+            let TextGeometry2D {
                 background: Some(background),
                 text_warnings,
                 ..
-            } = &scene.entities[0].geometry
+            } = &**text_geometry
             else {
                 panic!()
             };
@@ -2036,11 +2843,14 @@ mod tests {
             assert_eq!(scene.entities.len(), 2);
             for (entity, color) in scene.entities.iter().zip([0xff000000, 0xff0000ff]) {
                 assert_eq!(entity.color_argb, color);
-                let Entity2DGeometry::Text {
+                let Entity2DGeometry::Text(text_geometry) = &entity.geometry else {
+                    panic!()
+                };
+                let TextGeometry2D {
                     value,
                     background: Some(bg),
                     ..
-                } = &entity.geometry
+                } = &**text_geometry
                 else {
                     panic!()
                 };
@@ -2071,10 +2881,13 @@ mod tests {
                 panic!()
             };
             assert_eq!(scene.entities[0].color_argb, expected_ink);
-            let Entity2DGeometry::Text {
+            let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+                panic!()
+            };
+            let TextGeometry2D {
                 background: Some(bg),
                 ..
-            } = &scene.entities[0].geometry
+            } = &**text_geometry
             else {
                 panic!()
             };
@@ -2120,15 +2933,15 @@ mod tests {
                 panic!()
             };
             assert_eq!(scene.entities[0].color_argb, 0xff112233);
-            let Entity2DGeometry::Text {
-                background, value, ..
-            } = &scene.entities[0].geometry
-            else {
+            let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
                 panic!()
             };
+            let TextGeometry2D {
+                background, value, ..
+            } = &**text_geometry;
             assert_eq!(value, "中文\nالعربية 日本語");
             assert_eq!(
-                background.map(|b| (
+                background.as_deref().map(|b| (
                     b.fill,
                     b.frame,
                     b.scale,
@@ -2168,10 +2981,13 @@ mod tests {
                 panic!()
             };
             assert_eq!(scene.entities[0].color_argb, 0xff112233);
-            let Entity2DGeometry::Text {
+            let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+                panic!()
+            };
+            let TextGeometry2D {
                 background: Some(background),
                 ..
-            } = &scene.entities[0].geometry
+            } = &**text_geometry
             else {
                 panic!()
             };
@@ -2254,9 +3070,10 @@ mod tests {
             let SceneDocument::TwoD(scene) = opened.scene else {
                 panic!("expected Scene2D")
             };
-            let Entity2DGeometry::Text { value, .. } = &scene.entities[0].geometry else {
+            let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
                 panic!("expected text")
             };
+            let TextGeometry2D { value, .. } = &**text_geometry;
             assert_eq!(value, &format!("{label} 中"), "code page {name}");
         }
     }
@@ -2270,9 +3087,10 @@ mod tests {
         let SceneDocument::TwoD(scene) = opened.scene else {
             panic!("expected Scene2D")
         };
-        let Entity2DGeometry::Text { value, .. } = &scene.entities[0].geometry else {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
             panic!("expected text")
         };
+        let TextGeometry2D { value, .. } = &**text_geometry;
         assert_eq!(value, "বাংলা 中文 العربية");
     }
 
@@ -2354,9 +3172,10 @@ mod tests {
             panic!("expected Scene2D")
         };
         assert_eq!(scene.entities.len(), 2);
-        let Entity2DGeometry::Text { value, origin, .. } = &scene.entities[0].geometry else {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
             panic!("expected text")
         };
+        let TextGeometry2D { value, origin, .. } = &**text_geometry;
         assert_eq!(value, label);
         assert_eq!(*origin, Point2::new(10., 20.));
         assert!(scene.layers.iter().any(|layer| layer.name == label));
@@ -2653,15 +3472,15 @@ mod tests {
             };
             assert_eq!(scene.entities.len(), 8);
             for entity in &scene.entities {
-                let Entity2DGeometry::Text {
+                let Entity2DGeometry::Text(text_geometry) = &entity.geometry else {
+                    panic!()
+                };
+                let TextGeometry2D {
                     value,
                     line_spacing,
                     text_warnings,
                     ..
-                } = &entity.geometry
-                else {
-                    panic!()
-                };
+                } = &**text_geometry;
                 let (factor, exact) = value
                     .split_whitespace()
                     .next()
@@ -2713,12 +3532,12 @@ mod tests {
             };
             assert_eq!(scene.entities.len(), 7);
             for entity in &scene.entities {
-                let Entity2DGeometry::Text {
-                    value, rotation, ..
-                } = &entity.geometry
-                else {
+                let Entity2DGeometry::Text(text_geometry) = &entity.geometry else {
                     panic!()
                 };
+                let TextGeometry2D {
+                    value, rotation, ..
+                } = &**text_geometry;
                 let degrees = value
                     .split_whitespace()
                     .next()
@@ -3865,12 +4684,15 @@ mod tests {
             .entities
             .iter()
             .filter_map(|e| match &e.geometry {
-                Entity2DGeometry::Text {
-                    origin,
-                    value,
-                    plane,
-                    ..
-                } => Some((value.as_str(), *origin, *plane)),
+                Entity2DGeometry::Text(text_geometry) => {
+                    let TextGeometry2D {
+                        origin,
+                        value,
+                        plane,
+                        ..
+                    } = &**text_geometry;
+                    Some((value.as_str(), *origin, *plane))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -4357,21 +5179,24 @@ mod tests {
                 .entities
                 .iter()
                 .filter_map(|e| match &e.geometry {
-                    Entity2DGeometry::Text {
-                        origin,
-                        value,
-                        height,
-                        horizontal_alignment,
-                        vertical_alignment,
-                        ..
-                    } => Some((
-                        e.color_argb,
-                        value.as_str(),
-                        *origin,
-                        *height,
-                        *horizontal_alignment,
-                        *vertical_alignment,
-                    )),
+                    Entity2DGeometry::Text(text_geometry) => {
+                        let TextGeometry2D {
+                            origin,
+                            value,
+                            height,
+                            horizontal_alignment,
+                            vertical_alignment,
+                            ..
+                        } = &**text_geometry;
+                        Some((
+                            e.color_argb,
+                            value.as_str(),
+                            *origin,
+                            *height,
+                            *horizontal_alignment,
+                            *vertical_alignment,
+                        ))
+                    }
                     _ => None,
                 })
                 .collect::<Vec<_>>();
@@ -4506,21 +5331,23 @@ mod tests {
         let SceneDocument::TwoD(scene) = opened.scene else {
             panic!()
         };
-        let Entity2DGeometry::Text { value, shx, .. } = &scene.entities[0].geometry else {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
             panic!()
         };
+        let TextGeometry2D { value, shx, .. } = &**text_geometry;
         assert_eq!(value, "2\u{e133}16(\u{e130}10)3×3");
         assert_eq!(
-            shx.as_ref(),
+            shx.as_deref(),
             Some(&cad_core::ShxFonts2D {
                 font: Some("ebgen.shx".to_owned()),
                 big_font: Some("hztxt.shx".to_owned()),
             })
         );
         // The default STANDARD style uses the bare "txt" SHX font.
-        let Entity2DGeometry::Text { shx, .. } = &scene.entities[1].geometry else {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[1].geometry else {
             panic!()
         };
+        let TextGeometry2D { shx, .. } = &**text_geometry;
         assert_eq!(
             shx.as_ref().and_then(|fonts| fonts.font.as_deref()),
             Some("txt.shx")

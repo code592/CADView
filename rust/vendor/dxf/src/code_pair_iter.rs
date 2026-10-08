@@ -3,7 +3,8 @@ use crate::{CodePair, CodePairValue, DxfError, DxfResult, ExpectedType};
 use crate::code_pair_value::un_escape_ascii_to_unicode;
 use crate::helper_functions::*;
 use encoding_rs::Encoding;
-use std::io::{Cursor, Read};
+use std::borrow::Cow;
+use std::io::{BufRead, BufReader, Cursor, Read};
 
 pub(crate) trait CodePairIter: Iterator<Item = DxfResult<CodePair>> {
     fn read_with_encoding(&mut self, encoding: &'static Encoding);
@@ -49,7 +50,8 @@ impl DirectCodePairIter {
 
 /// Returns code pairs as read from text.  Handles the most common DXF files and when parsed from strings.
 pub(crate) struct TextCodePairIter<T: Read> {
-    reader: T,
+    reader: BufReader<T>,
+    line_buffer: Vec<u8>,
     string_encoding: &'static Encoding,
     first_line: String,
     read_first_line: bool,
@@ -77,27 +79,69 @@ impl<T: Read> TextCodePairIter<T> {
         offset: usize,
     ) -> Self {
         TextCodePairIter {
-            reader,
+            reader: BufReader::with_capacity(64 * 1024, reader),
+            line_buffer: Vec::with_capacity(128),
             string_encoding,
             first_line,
             read_first_line: false,
             offset,
         }
     }
+    // Reuse line storage and read buffered spans instead of allocating and
+    // issuing Read::read once per byte for every numeric code/value pair.
+    // Keep decoding errors, BOM policy, CRLF and DXF offsets unchanged.
+    fn read_text_line(
+        &mut self,
+        allow_bom: bool,
+        encoding: &'static Encoding,
+    ) -> DxfResult<Cow<'_, str>> {
+        self.line_buffer.clear();
+        self.reader
+            .read_until(b'\n', &mut self.line_buffer)
+            .map_err(DxfError::IoError)?;
+        let mut bytes = self.line_buffer.as_slice();
+        if bytes.last() == Some(&b'\n') {
+            bytes = &bytes[..bytes.len() - 1];
+        }
+        if allow_bom && bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+            bytes = &bytes[3..];
+        }
+        let result = if encoding.is_ascii_compatible() && bytes.is_ascii() {
+            // ASCII is shared by every supported DXF code page.
+            Cow::Borrowed(std::str::from_utf8(bytes).unwrap())
+        } else {
+            let (decoded, _, malformed) = encoding.decode(bytes);
+            if malformed {
+                return Err(DxfError::MalformedString);
+            }
+            decoded
+        };
+        Ok(match result {
+            Cow::Borrowed(text) => Cow::Borrowed(text.strip_suffix('\r').unwrap_or(text)),
+            Cow::Owned(mut text) => {
+                if text.ends_with('\r') {
+                    text.pop();
+                }
+                Cow::Owned(text)
+            }
+        })
+    }
     fn read_code_pair(&mut self) -> Option<DxfResult<CodePair>> {
         // Read code.  If no line is available, fail gracefully.
-        let code_line = if self.read_first_line {
+        let read_first_line = self.read_first_line;
+        if read_first_line {
             self.offset += 1;
-            match read_line(&mut self.reader, true, encoding_rs::WINDOWS_1252) {
+        } else {
+            self.read_first_line = true;
+        }
+        let code_offset = self.offset;
+        let code_line = if read_first_line {
+            match self.read_text_line(true, encoding_rs::WINDOWS_1252) {
                 Ok(v) => v,
                 Err(e) => return Some(Err(e)),
             }
         } else {
-            self.read_first_line = true;
-
-            // .clone() is fine because it'll only ever be called once and the only valid
-            // values that might be cloned are: "0" and "999"; all others are errors.
-            self.first_line.clone()
+            Cow::Borrowed(self.first_line.as_str())
         };
         let code_line = code_line.trim();
         if code_line.is_empty() {
@@ -105,12 +149,16 @@ impl<T: Read> TextCodePairIter<T> {
             return None;
         }
 
-        let code_offset = self.offset;
-        let code = try_into_option!(parse_i32(String::from(code_line), code_offset));
+        let code = match code_line.parse::<i32>() {
+            Ok(value) => value,
+            Err(error) => return Some(Err(DxfError::ParseIntError(error, code_offset))),
+        };
 
         // Read value.  If no line is available die horribly.
         self.offset += 1;
-        let value_line = match read_line(&mut self.reader, false, self.string_encoding) {
+        let value_offset = self.offset;
+        let string_encoding = self.string_encoding;
+        let value_line = match self.read_text_line(false, string_encoding) {
             Ok(v) => v,
             Err(e) => return Some(Err(e)),
         };
@@ -118,27 +166,27 @@ impl<T: Read> TextCodePairIter<T> {
         // construct the value pair
         let expected_type = match ExpectedType::new(code) {
             Some(t) => t,
-            None => return Some(Err(DxfError::UnexpectedEnumValue(self.offset))),
+            None => return Some(Err(DxfError::UnexpectedEnumValue(value_offset))),
         };
         let value = match expected_type {
             ExpectedType::Boolean => {
-                CodePairValue::Boolean(try_into_option!(parse_i16(value_line, self.offset)))
+                CodePairValue::Boolean(try_into_option!(parse_i16(value_line, value_offset)))
             }
             ExpectedType::Integer => {
-                CodePairValue::Integer(try_into_option!(parse_i32(value_line, self.offset)))
+                CodePairValue::Integer(try_into_option!(parse_i32(value_line, value_offset)))
             }
             ExpectedType::Long => {
-                CodePairValue::Long(try_into_option!(parse_i64(value_line, self.offset)))
+                CodePairValue::Long(try_into_option!(parse_i64(value_line, value_offset)))
             }
             ExpectedType::Short => {
-                CodePairValue::Short(try_into_option!(parse_i16(value_line, self.offset)))
+                CodePairValue::Short(try_into_option!(parse_i16(value_line, value_offset)))
             }
             ExpectedType::Double => {
-                CodePairValue::Double(try_into_option!(parse_f64(value_line, self.offset)))
+                CodePairValue::Double(try_into_option!(parse_f64(value_line, value_offset)))
             }
             ExpectedType::Str => {
-                let value_line = if self.string_encoding == encoding_rs::WINDOWS_1252 {
-                    un_escape_ascii_to_unicode(&value_line)
+                let value_line = if string_encoding == encoding_rs::WINDOWS_1252 {
+                    Cow::Owned(un_escape_ascii_to_unicode(&value_line))
                 } else {
                     value_line
                 };
@@ -147,7 +195,7 @@ impl<T: Read> TextCodePairIter<T> {
             }
             ExpectedType::Binary => {
                 let mut data = vec![];
-                match parse_hex_string(&value_line, &mut data, self.offset) {
+                match parse_hex_string(&value_line, &mut data, value_offset) {
                     Ok(()) => CodePairValue::Binary(data),
                     Err(e) => return Some(Err(e)),
                 }
@@ -394,13 +442,48 @@ mod tests {
 
     fn read_in_text(data: &str) -> CodePair {
         let mut reader = TextCodePairIter::<&[u8]> {
-            reader: data.as_bytes(),
+            reader: std::io::BufReader::new(data.as_bytes()),
+            line_buffer: Vec::new(),
             string_encoding: encoding_rs::WINDOWS_1252,
             first_line: String::from("not-important"),
             read_first_line: true,
             offset: 0,
         };
         reader.read_code_pair().unwrap().unwrap()
+    }
+
+    #[test]
+    fn buffered_ascii_lines_borrow_storage_and_preserve_error_offsets() {
+        let mut reader = TextCodePairIter::new(
+            "123\r\n40\r\nnot-a-number\r\n".as_bytes(),
+            encoding_rs::UTF_8,
+            String::new(),
+            0,
+        );
+        assert!(matches!(
+            reader.read_text_line(false, encoding_rs::UTF_8).unwrap(),
+            std::borrow::Cow::Borrowed("123")
+        ));
+        reader.read_first_line = true;
+        assert!(matches!(
+            reader.read_code_pair().unwrap(),
+            Err(crate::DxfError::ParseFloatError(_, 2))
+        ));
+        // Legacy DXF short values are permitted to contain decimal text.
+        assert_eq!(2, read_in_text("70\r\n2.0\r\n").assert_i16().unwrap());
+    }
+
+    #[test]
+    fn buffered_utf8_string_survives_reader_reuse_and_large_lines() {
+        let text = "中文é".repeat(30_000);
+        let data = format!("{text}\r\n40\r\n3.5\r\n");
+        let mut reader =
+            TextCodePairIter::new(data.as_bytes(), encoding_rs::UTF_8, "1".to_owned(), 0);
+        let first = reader.read_code_pair().unwrap().unwrap();
+        let second = reader.read_code_pair().unwrap().unwrap();
+        assert_eq!(first.assert_string().unwrap(), text);
+        assert_eq!(second.assert_f64().unwrap(), 3.5);
+        assert!(reader.read_code_pair().is_none());
     }
 
     #[test]

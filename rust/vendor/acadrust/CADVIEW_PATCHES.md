@@ -70,6 +70,12 @@ Local changes:
   sensitivity to explicit XY/Z direction differences. The original four failing
   complex-line-type/deep-roundtrip cases remain failing and are documented.
 
+- `src/io/dwg/dwg_stream_readers/bit_reader.rs` and
+  `src/io/dwg/dwg_stream_readers/object_reader/mod.rs`: the bit reader keeps its
+  record bytes in a shared `Arc<[u8]>`; the temporary, main, text and handle
+  readers of one object record share one copy instead of five. Decoding is
+  unchanged (CADView's scene output for its DWG samples is byte-identical).
+
 No parser compatibility claim is based solely on the modified writer's round
 trip tests. CADView additionally uses independent matrix arithmetic and real
 pixel assertions; original-CAD comparison and licensed corpus gates still apply.

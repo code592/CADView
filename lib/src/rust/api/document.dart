@@ -7,9 +7,9 @@ import '../frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `angle_on_arc`, `append_nearby_curves`, `apply_annotation`, `build_entity_statistics`, `circle_intersections`, `contains`, `cross`, `curve_intersections`, `distance_to`, `empty_bounds`, `entity_area`, `entity_distance`, `entity_id`, `entity_kind`, `entity_length`, `format_id`, `has_node`, `invalidate_session_viewports`, `load_cached_document`, `move_history`, `nearest_intersection`, `normalized_arc_sweep`, `open_document_internal`, `point_on_circle`, `point_segment_distance`, `push_ticket_event`, `scene_cache_path`, `scene_kind`, `segment_circle_intersections`, `segment_intersection`, `serialize_session_document`, `set_node_visibility`, `snap_points`, `source_state`, `spatial_candidates`, `write_cached_document`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DocumentSession`, `MeasuredTextBounds`, `NativeViewportState`, `OpenTicketState`, `SceneCacheEnvelope`, `SnapCurve`, `TextLayoutItem`, `TicketSceneSink`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `partial`, `progress`
+// These functions are ignored because they are not marked as `pub`: `angle_on_arc`, `append_nearby_curves`, `apply_annotation`, `begin_open_document_impl`, `build_entity_statistics`, `circle_intersections`, `contains`, `cross`, `curve_intersections`, `distance_to`, `empty_bounds`, `entity_area`, `entity_distance`, `entity_id`, `entity_kind`, `entity_length`, `format_id`, `has_node`, `invalidate_session_viewports`, `load_cached_document`, `move_history`, `nearest_intersection`, `normalized_arc_sweep`, `open_document_internal`, `point_on_circle`, `point_segment_distance`, `push_ticket_event`, `scene_cache_path`, `scene_kind`, `scene_packet_internal`, `segment_circle_intersections`, `segment_intersection`, `serialize_session_document`, `serialize_session_view`, `set_node_visibility`, `snap_points`, `source_state`, `spatial_candidates`, `worker_threads`, `write_cached_document`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `CachedSceneRef`, `CachedScene`, `DocumentSession`, `MeasuredTextBounds`, `NativeViewportState`, `OpenTicketState`, `SceneCacheHeaderRef`, `SceneCacheHeader`, `SnapCurve`, `TextLayoutItem`, `TicketSceneSink`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `partial`, `progress`
 
 List<FormatInfo> supportedFormats() =>
     RustLib.instance.api.crateApiDocumentSupportedFormats();
@@ -25,6 +25,11 @@ Future<OpenDocumentResponse> openDocument({required String path}) =>
 
 OpenTicket beginOpenDocument({required String path}) =>
     RustLib.instance.api.crateApiDocumentBeginOpenDocument(path: path);
+
+/// Metadata-first open; the UI fetches lossless packed geometry (2D after
+/// text-envelope refinement). The legacy JSON open APIs remain compatible.
+OpenTicket beginOpenDocumentCompact({required String path}) =>
+    RustLib.instance.api.crateApiDocumentBeginOpenDocumentCompact(path: path);
 
 List<DocumentEventInfo> pollDocumentEvents({required BigInt ticketId}) =>
     RustLib.instance.api.crateApiDocumentPollDocumentEvents(ticketId: ticketId);
@@ -83,7 +88,24 @@ Future<String> viewportDocument({
   maxY: maxY,
 );
 
-bool closeDocument({required BigInt sessionId}) =>
+Future<Uint8List> documentPacket({required BigInt sessionId}) =>
+    RustLib.instance.api.crateApiDocumentDocumentPacket(sessionId: sessionId);
+
+Future<Uint8List> viewportPacket({
+  required BigInt sessionId,
+  required double minX,
+  required double minY,
+  required double maxX,
+  required double maxY,
+}) => RustLib.instance.api.crateApiDocumentViewportPacket(
+  sessionId: sessionId,
+  minX: minX,
+  minY: minY,
+  maxX: maxX,
+  maxY: maxY,
+);
+
+Future<bool> closeDocument({required BigInt sessionId}) =>
     RustLib.instance.api.crateApiDocumentCloseDocument(sessionId: sessionId);
 
 ViewportInfo createViewport({
@@ -125,7 +147,8 @@ String setVisibilities({
   changes: changes,
 );
 
-HitResult? hitTest({
+/// Run candidate geometry checks on a bridge worker, never the UI thread.
+Future<HitResult?> hitTest({
   required BigInt sessionId,
   required double x,
   required double y,
@@ -137,6 +160,25 @@ HitResult? hitTest({
   tolerance: tolerance,
 );
 
+/// Worker-isolate ray pick against the retained, unsampled source triangles.
+Future<RayHitResult?> hitTestRay({
+  required BigInt sessionId,
+  required double ox,
+  required double oy,
+  required double oz,
+  required double dx,
+  required double dy,
+  required double dz,
+}) => RustLib.instance.api.crateApiDocumentHitTestRay(
+  sessionId: sessionId,
+  ox: ox,
+  oy: oy,
+  oz: oz,
+  dx: dx,
+  dy: dy,
+  dz: dz,
+);
+
 EntityCountSummary? entityCountSummary({
   required BigInt sessionId,
   required BigInt entityId,
@@ -145,7 +187,7 @@ EntityCountSummary? entityCountSummary({
   entityId: entityId,
 );
 
-SnapResult? snap({
+Future<SnapResult?> snap({
   required BigInt sessionId,
   required double x,
   required double y,
@@ -162,7 +204,7 @@ SnapResult? snap({
 /// This is separate from [`snap`] so tools that explicitly collect a boundary
 /// can prefer a crossing without changing the nearest-snap behaviour used by
 /// distance, coordinate and editing tools.
-SnapResult? snapIntersection({
+Future<SnapResult?> snapIntersection({
   required BigInt sessionId,
   required double x,
   required double y,
@@ -540,6 +582,45 @@ class OpenTicket {
       other is OpenTicket &&
           runtimeType == other.runtimeType &&
           ticketId == other.ticketId;
+}
+
+class RayHitResult {
+  final BigInt meshId;
+  final BigInt triangleIndex;
+  final double x;
+  final double y;
+  final double z;
+  final double distance;
+
+  const RayHitResult({
+    required this.meshId,
+    required this.triangleIndex,
+    required this.x,
+    required this.y,
+    required this.z,
+    required this.distance,
+  });
+
+  @override
+  int get hashCode =>
+      meshId.hashCode ^
+      triangleIndex.hashCode ^
+      x.hashCode ^
+      y.hashCode ^
+      z.hashCode ^
+      distance.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is RayHitResult &&
+          runtimeType == other.runtimeType &&
+          meshId == other.meshId &&
+          triangleIndex == other.triangleIndex &&
+          x == other.x &&
+          y == other.y &&
+          z == other.z &&
+          distance == other.distance;
 }
 
 class SnapResult {

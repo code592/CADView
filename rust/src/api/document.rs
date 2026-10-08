@@ -1,3 +1,4 @@
+use cad_core::TextGeometry2D;
 use cad_core::{
     distance_2d, distance_3d, simple_polygon_area, Annotation, AnnotationAnchor,
     AnnotationDocument, AnnotationGeometry, Bounds2, CancellationToken, Entity2DGeometry, FormatId,
@@ -28,12 +29,13 @@ static VIEWPORTS: Lazy<RwLock<HashMap<u64, NativeViewportState>>> =
 
 const INITIAL_2D_ENTITY_LIMIT: usize = 250_000;
 // Version 12 includes validated per-mesh volume centroid coordinates.
-const SCENE_CACHE_VERSION: u32 = 31;
+const SCENE_CACHE_VERSION: u32 = 32;
 const DWG_PARSER_VERSION: &str = "acadrust-0.4.1+cadview-17";
 
 struct DocumentSession {
     document: OpenedDocument,
     spatial_index: Option<SceneIndex2D>,
+    spatial_index_3d: Option<cad_core::SceneIndex3D>,
     text_layout_bounds: HashMap<u64, Bounds2>,
     entity_kind_counts: HashMap<String, u64>,
     layer_entity_kind_counts: HashMap<(u64, String), u64>,
@@ -134,14 +136,63 @@ impl cad_core::SceneSink for TicketSceneSink {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-struct SceneCacheEnvelope {
+/// Scene cache file: [CACHE_MAGIC], then length-prefixed CBOR blobs. The
+/// first is a [SceneCacheHeader]; the 2D entities follow in separate
+/// chunks, so a stale cache is rejected after reading the small header and
+/// a valid one is decoded on several threads.
+const CACHE_MAGIC: &[u8; 8] = b"CVSCENE2";
+
+#[derive(Deserialize)]
+struct SceneCacheHeader {
     version: u32,
     parser_version: String,
     source_length: u64,
     source_modified_nanos: u128,
     source_hash: String,
-    document: OpenedDocument,
+    metadata: cad_core::DocumentMetadata,
+    diagnostics: Vec<cad_core::FormatDiagnostic>,
+    scene: CachedScene,
+    entity_chunks: u32,
+}
+
+#[derive(Serialize)]
+struct SceneCacheHeaderRef<'a> {
+    version: u32,
+    parser_version: &'a str,
+    source_length: u64,
+    source_modified_nanos: u128,
+    source_hash: &'a str,
+    metadata: &'a cad_core::DocumentMetadata,
+    diagnostics: &'a [cad_core::FormatDiagnostic],
+    scene: CachedSceneRef<'a>,
+    entity_chunks: u32,
+}
+
+/// The scene without its 2D entities, which are stored in chunks.
+#[derive(Deserialize)]
+enum CachedScene {
+    TwoD {
+        layers: Vec<cad_core::Layer>,
+        bounds: Option<Bounds2>,
+    },
+    Other(SceneDocument),
+}
+
+#[derive(Serialize)]
+enum CachedSceneRef<'a> {
+    TwoD {
+        layers: &'a [cad_core::Layer],
+        bounds: Option<Bounds2>,
+    },
+    Other(&'a SceneDocument),
+}
+
+/// Threads used to encode/decode cache chunks and similar bulk work.
+fn worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -243,10 +294,13 @@ fn open_document_internal(
     path: String,
     cancel: &CancellationToken,
     sink: Option<&mut dyn cad_core::SceneSink>,
+    compact: bool,
 ) -> Result<OpenDocumentResponse, String> {
     cancel.check().map_err(|error| error.to_string())?;
     let source_path = Path::new(&path);
-    let document = load_cached_document(source_path).unwrap_or_else(|| {
+    let cached = load_cached_document(source_path);
+    let write_cache = cached.is_none() && !APPLICATION_BACKGROUNDED.load(Ordering::Acquire);
+    let document = cached.unwrap_or_else(|| {
         let registry = cad_formats::default_registry();
         let mut document = registry
             .open_path(source_path, cancel, sink)
@@ -255,9 +309,6 @@ fn open_document_internal(
             document.metadata.frames = cad_core::detect_drawing_frames(scene);
         }
         cancel.check().map_err(|error| error.to_string())?;
-        if !APPLICATION_BACKGROUNDED.load(Ordering::Acquire) {
-            write_cached_document(source_path, &document);
-        }
         Ok::<OpenedDocument, String>(document)
     })?;
     cancel.check().map_err(|error| error.to_string())?;
@@ -270,9 +321,26 @@ fn open_document_internal(
         SceneDocument::TwoD(scene) => scene.entities.len() as u64,
         _ => 0,
     };
-    let spatial_index = match &document.scene {
-        SceneDocument::TwoD(scene) => Some(SceneIndex2D::build(scene)),
-        _ => None,
+    // The indexes, statistics and cache file only read the document; build
+    // them side by side rather than one after another.
+    let (spatial_index, spatial_index_3d, statistics) = std::thread::scope(|scope| {
+        let cache =
+            write_cache.then(|| scope.spawn(|| write_cached_document(source_path, &document)));
+        let index = scope.spawn(|| match &document.scene {
+            SceneDocument::TwoD(scene) => (Some(SceneIndex2D::build(scene)), None),
+            SceneDocument::ThreeD(scene) => (None, Some(cad_core::SceneIndex3D::build(scene))),
+            _ => (None, None),
+        });
+        let statistics = build_entity_statistics(&document);
+        let (index_2d, index_3d) = index.join().unwrap_or((None, None));
+        if let Some(cache) = cache {
+            let _ = cache.join();
+        }
+        (index_2d, index_3d, statistics)
+    });
+    let spatial_index = match (&document.scene, spatial_index) {
+        (SceneDocument::TwoD(scene), None) => Some(SceneIndex2D::build(scene)),
+        (_, index) => index,
     };
     let annotations = AnnotationDocument::new(document.metadata.fingerprint.clone());
     let (
@@ -282,12 +350,13 @@ fn open_document_internal(
         layer_entity_kind_lengths,
         entity_kind_areas,
         layer_entity_kind_areas,
-    ) = build_entity_statistics(&document);
+    ) = statistics;
     SESSIONS.write().insert(
         session_id,
         DocumentSession {
             document,
             spatial_index,
+            spatial_index_3d,
             text_layout_bounds: HashMap::new(),
             entity_kind_counts,
             layer_entity_kind_counts,
@@ -305,7 +374,7 @@ fn open_document_internal(
     // replaced by an exact spatial-index viewport query in Flutter. Never
     // stride-sample CAD entities: a sampled preview can remove dimensions,
     // borders or block details and therefore misrepresent the drawing.
-    let include_initial_entities = total_entity_count <= INITIAL_2D_ENTITY_LIMIT as u64;
+    let include_initial_entities = total_entity_count <= INITIAL_2D_ENTITY_LIMIT as u64 && !compact;
     let document_json = serialize_session_document(session_id, None, include_initial_entities)
         .inspect_err(|_| {
             SESSIONS.write().remove(&session_id);
@@ -326,7 +395,7 @@ fn open_document_internal(
 /// begin_open_document/poll_document_events/finish_open_document so opening is
 /// cancellable and progress never blocks the Dart isolate.
 pub fn open_document(path: String) -> Result<OpenDocumentResponse, String> {
-    open_document_internal(path, &CancellationToken::default(), None)
+    open_document_internal(path, &CancellationToken::default(), None, false)
 }
 
 fn push_ticket_event(ticket_id: u64, event: DocumentEventInfo) {
@@ -347,6 +416,17 @@ fn push_ticket_event(ticket_id: u64, event: DocumentEventInfo) {
 
 #[flutter_rust_bridge::frb(sync)]
 pub fn begin_open_document(path: String) -> Result<OpenTicket, String> {
+    begin_open_document_impl(path, false)
+}
+
+/// Metadata-first open; the UI fetches lossless packed geometry (2D after
+/// text-envelope refinement). The legacy JSON open APIs remain compatible.
+#[flutter_rust_bridge::frb(sync)]
+pub fn begin_open_document_compact(path: String) -> Result<OpenTicket, String> {
+    begin_open_document_impl(path, true)
+}
+
+fn begin_open_document_impl(path: String, compact: bool) -> Result<OpenTicket, String> {
     if APPLICATION_BACKGROUNDED.load(Ordering::Acquire) {
         return Err("cannot begin opening a document while the app is backgrounded".to_owned());
     }
@@ -378,7 +458,7 @@ pub fn begin_open_document(path: String) -> Result<OpenTicket, String> {
                 ticket_id,
                 emitted_first_frame: false,
             };
-            let result = open_document_internal(path, &cancel, Some(&mut sink));
+            let result = open_document_internal(path, &cancel, Some(&mut sink), compact);
             let event = match &result {
                 Ok(response) => DocumentEventInfo {
                     kind: "complete".to_owned(),
@@ -469,6 +549,43 @@ fn serialize_session_document(
     let session = sessions
         .get(&session_id)
         .ok_or_else(|| "unknown session".to_owned())?;
+    serialize_session_view(session, viewport, include_2d_entities)
+}
+
+fn serialize_session_view(
+    session: &DocumentSession,
+    viewport: Option<Bounds2>,
+    include_2d_entities: bool,
+) -> Result<String, String> {
+    // Serialize borrowed geometry. Large polylines/meshes must not be cloned
+    // just to produce a bridge packet; only candidate references are retained.
+    #[derive(Serialize)]
+    struct SceneView<'a> {
+        layers: &'a [cad_core::Layer],
+        entities: Vec<&'a cad_core::Entity2D>,
+        bounds: Option<Bounds2>,
+    }
+    #[derive(Serialize)]
+    struct Scene3DView<'a> {
+        root_nodes: &'a [cad_core::AssemblyNode],
+        meshes: &'a [cad_core::Mesh3D],
+        materials: &'a [cad_core::Material3D],
+        bounds: Option<cad_core::Bounds3>,
+        stats: &'a cad_core::MeshStats,
+    }
+    #[derive(Serialize)]
+    #[serde(tag = "scene_kind", content = "scene", rename_all = "snake_case")]
+    enum SceneViewEnvelope<'a> {
+        TwoD(SceneView<'a>),
+        ThreeD(Scene3DView<'a>),
+        Paged(&'a cad_core::PagedScene),
+    }
+    #[derive(Serialize)]
+    struct DocumentView<'a> {
+        metadata: &'a cad_core::DocumentMetadata,
+        scene: SceneViewEnvelope<'a>,
+        diagnostics: &'a [cad_core::FormatDiagnostic],
+    }
     let scene = match &session.document.scene {
         SceneDocument::TwoD(source) => {
             let visible_layers = source
@@ -477,37 +594,48 @@ fn serialize_session_document(
                 .filter(|layer| layer.visible)
                 .map(|layer| layer.id)
                 .collect::<HashSet<_>>();
-            let candidates = viewport.and_then(|bounds| {
-                session
-                    .spatial_index
-                    .as_ref()
-                    .map(|index| index.query(bounds).into_iter().collect::<HashSet<_>>())
-            });
-            let filtered = source.entities.iter().filter(|entity| {
-                visible_layers.contains(&entity.layer_id)
-                    && candidates
-                        .as_ref()
-                        .is_none_or(|ids| ids.contains(&entity.id))
-            });
-            let entities = if include_2d_entities {
-                filtered.cloned().collect()
-            } else {
+            let entities = if !include_2d_entities {
                 Vec::new()
+            } else if let Some((bounds, index)) = viewport.zip(session.spatial_index.as_ref()) {
+                index
+                    .query_indices(bounds)
+                    .into_iter()
+                    .filter_map(|index| source.entities.get(index))
+                    .filter(|entity| visible_layers.contains(&entity.layer_id))
+                    .collect()
+            } else {
+                source
+                    .entities
+                    .iter()
+                    .filter(|entity| visible_layers.contains(&entity.layer_id))
+                    .collect()
             };
-            SceneDocument::TwoD(cad_core::Scene2D {
-                layers: source.layers.clone(),
+            SceneViewEnvelope::TwoD(SceneView {
+                layers: &source.layers,
                 entities,
                 bounds: source.bounds,
             })
         }
-        // The retained viewport conversion is currently targeted at the large
-        // 2D CAD path. Existing 3D/PDF behaviour remains compatible.
-        other => other.clone(),
+        // Compact open and visibility responses retain mesh metadata only.
+        SceneDocument::ThreeD(scene) => SceneViewEnvelope::ThreeD(Scene3DView {
+            root_nodes: &scene.root_nodes,
+            // Summary/visibility responses only change the assembly tree;
+            // the UI retains the exact vertex/triangle buffers.
+            meshes: if include_2d_entities {
+                &scene.meshes
+            } else {
+                &[]
+            },
+            materials: &scene.materials,
+            bounds: scene.bounds,
+            stats: &scene.stats,
+        }),
+        SceneDocument::Paged(scene) => SceneViewEnvelope::Paged(scene),
     };
-    serde_json::to_string(&OpenedDocument {
-        metadata: session.document.metadata.clone(),
+    serde_json::to_string(&DocumentView {
+        metadata: &session.document.metadata,
         scene,
-        diagnostics: session.document.diagnostics.clone(),
+        diagnostics: &session.document.diagnostics,
     })
     .map_err(|error| error.to_string())
 }
@@ -540,36 +668,100 @@ fn load_cached_document(path: &Path) -> Option<Result<OpenedDocument, String>> {
     let cache_path = scene_cache_path(path)?;
     let (source_length, source_modified_nanos) = source_state(path)?;
     let bytes = std::fs::read(&cache_path).ok()?;
-    let envelope = match ciborium::from_reader::<SceneCacheEnvelope, _>(bytes.as_slice()) {
-        Ok(envelope) => envelope,
-        Err(_) => {
-            let _ = std::fs::remove_file(cache_path);
-            return None;
+    let discard = || {
+        let _ = std::fs::remove_file(&cache_path);
+        None
+    };
+    // Length-prefixed blobs after the magic.
+    let mut blobs = Vec::new();
+    let mut rest = match bytes.strip_prefix(CACHE_MAGIC) {
+        Some(rest) => rest,
+        None => return discard(),
+    };
+    while !rest.is_empty() {
+        let Some((length, tail)) = rest.split_first_chunk::<8>() else {
+            return discard();
+        };
+        let length = u64::from_le_bytes(*length) as usize;
+        if length > tail.len() {
+            return discard();
         }
+        blobs.push(&tail[..length]);
+        rest = &tail[length..];
+    }
+    let Some((header, chunks)) = blobs.split_first() else {
+        return discard();
     };
-    if envelope.version != SCENE_CACHE_VERSION
-        || envelope.parser_version != DWG_PARSER_VERSION
-        || envelope.source_length != source_length
-        || envelope.source_modified_nanos != source_modified_nanos
+    let header = match ciborium::from_reader::<SceneCacheHeader, _>(*header) {
+        Ok(header) => header,
+        Err(_) => return discard(),
+    };
+    if header.version != SCENE_CACHE_VERSION
+        || header.parser_version != DWG_PARSER_VERSION
+        || header.source_length != source_length
+        || header.source_modified_nanos != source_modified_nanos
+        || header.entity_chunks as usize != chunks.len()
     {
-        let _ = std::fs::remove_file(cache_path);
-        return None;
+        return discard();
     }
-    let source_hash = match cad_core::fingerprint_path(path) {
-        Ok(hash) => hash,
-        Err(error) => return Some(Err(error.to_string())),
+    // Decode the entity chunks while the source is hashed.
+    let (source_hash, decoded) = std::thread::scope(|scope| {
+        let hash = scope.spawn(|| cad_core::fingerprint_path(path));
+        let decoded = chunks
+            .chunks(chunks.len().div_ceil(worker_threads()).max(1))
+            .map(|group| {
+                scope.spawn(move || {
+                    group
+                        .iter()
+                        .map(|chunk| ciborium::from_reader::<Vec<cad_core::Entity2D>, _>(*chunk))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|worker| worker.join().ok().and_then(Result::ok))
+            .collect::<Option<Vec<_>>>();
+        (hash.join(), decoded)
+    });
+    let source_hash = match source_hash {
+        Ok(Ok(hash)) => hash,
+        Ok(Err(error)) => return Some(Err(error.to_string())),
+        Err(_) => return discard(),
     };
-    if envelope.source_hash != source_hash {
-        let _ = std::fs::remove_file(cache_path);
-        return None;
+    if header.source_hash != source_hash {
+        return discard();
     }
-    Some(Ok(envelope.document))
+    let Some(decoded) = decoded else {
+        return discard();
+    };
+    let scene = match header.scene {
+        CachedScene::TwoD { layers, bounds } => {
+            let mut entities = Vec::with_capacity(decoded.iter().flatten().map(Vec::len).sum());
+            for chunk in decoded.into_iter().flatten() {
+                entities.extend(chunk);
+            }
+            SceneDocument::TwoD(cad_core::Scene2D {
+                layers,
+                entities,
+                bounds,
+            })
+        }
+        CachedScene::Other(scene) => scene,
+    };
+    Some(Ok(OpenedDocument {
+        metadata: header.metadata,
+        scene,
+        diagnostics: header.diagnostics,
+    }))
 }
 
 fn write_cached_document(path: &Path, document: &OpenedDocument) {
-    // DWG normalization is currently the expensive cache target. Avoid
-    // duplicating the already fast lightweight adapters on disk.
-    if document.metadata.format != FormatId::Dwg {
+    // Large DXF files incur the same normalization/index cost as DWG. Small
+    // lightweight inputs and raster/mesh files do not need a redundant cache.
+    if document.metadata.format != FormatId::Dwg
+        && !(document.metadata.format == FormatId::Dxf
+            && document.metadata.byte_length >= 4 * 1024 * 1024)
+    {
         return;
     }
     let Some(cache_path) = scene_cache_path(path) else {
@@ -578,21 +770,76 @@ fn write_cached_document(path: &Path, document: &OpenedDocument) {
     let Some((source_length, source_modified_nanos)) = source_state(path) else {
         return;
     };
-    let envelope = SceneCacheEnvelope {
+    let (scene, entities): (CachedSceneRef<'_>, &[cad_core::Entity2D]) = match &document.scene {
+        SceneDocument::TwoD(scene) => (
+            CachedSceneRef::TwoD {
+                layers: &scene.layers,
+                bounds: scene.bounds,
+            },
+            &scene.entities,
+        ),
+        other => (CachedSceneRef::Other(other), &[]),
+    };
+    let threads = worker_threads();
+    let chunk_size = entities.len().div_ceil(threads * 4).max(4096);
+    let chunks = entities.chunks(chunk_size).collect::<Vec<_>>();
+    let header = SceneCacheHeaderRef {
         version: SCENE_CACHE_VERSION,
-        parser_version: DWG_PARSER_VERSION.to_owned(),
+        parser_version: DWG_PARSER_VERSION,
         source_length,
         source_modified_nanos,
-        source_hash: document.metadata.fingerprint.clone(),
-        document: document.clone(),
+        source_hash: &document.metadata.fingerprint,
+        metadata: &document.metadata,
+        diagnostics: &document.diagnostics,
+        scene,
+        entity_chunks: chunks.len() as u32,
     };
-    let mut bytes = Vec::new();
-    if ciborium::into_writer(&envelope, &mut bytes).is_err() {
-        return;
-    }
-    let temporary_path = cache_path.with_extension("scene.bin.tmp");
-    if std::fs::write(&temporary_path, bytes).is_ok() {
-        let _ = std::fs::rename(temporary_path, cache_path);
+    // Unique temporary paths avoid collisions between the two open workers.
+    let temporary_path = cache_path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let written = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let file = std::fs::File::create(&temporary_path)?;
+        let mut writer = std::io::BufWriter::with_capacity(256 * 1024, file);
+        writer.write_all(CACHE_MAGIC)?;
+        let mut blob = |bytes: &[u8]| -> std::io::Result<()> {
+            writer.write_all(&(bytes.len() as u64).to_le_bytes())?;
+            writer.write_all(bytes)
+        };
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&header, &mut encoded).map_err(std::io::Error::other)?;
+        blob(&encoded)?;
+        // Encode a group of chunks in parallel, write it, then the next, so
+        // at most one group of encoded chunks is held at a time.
+        for group in chunks.chunks(threads) {
+            let encoded = std::thread::scope(|scope| {
+                group
+                    .iter()
+                    .map(|chunk| {
+                        scope.spawn(move || {
+                            let mut bytes = Vec::new();
+                            ciborium::into_writer(chunk, &mut bytes).map(|()| bytes)
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|worker| {
+                        worker
+                            .join()
+                            .map_err(|_| std::io::Error::other("cache encoder panicked"))?
+                            .map_err(std::io::Error::other)
+                    })
+                    .collect::<std::io::Result<Vec<_>>>()
+            })?;
+            for bytes in &encoded {
+                blob(bytes)?;
+            }
+        }
+        drop(blob);
+        writer.flush()?;
+        std::fs::rename(&temporary_path, &cache_path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(temporary_path);
     }
 }
 
@@ -634,7 +881,7 @@ pub fn text_layout_batch(session_id: u64, start: u64) -> Result<String, String> 
     let mut payload_bytes = 256; // envelope/cursor and comma overhead
     while next < scene.entities.len() && items.len() < 64 {
         let entity = &scene.entities[next];
-        if let Entity2DGeometry::Text { .. } = &entity.geometry {
+        if let Entity2DGeometry::Text(_) = &entity.geometry {
             let item = TextLayoutItem {
                 index: next,
                 id: entity.id,
@@ -690,7 +937,7 @@ pub fn apply_text_layout_bounds(session_id: u64, packet: String) -> Result<(), S
             return Err("invalid measured text bounds".to_owned());
         }
         if !scene.entities.get(item.index).is_some_and(|entity| {
-            entity.id == item.id && matches!(entity.geometry, Entity2DGeometry::Text { .. })
+            entity.id == item.id && matches!(entity.geometry, Entity2DGeometry::Text(_))
         }) {
             return Err("text bounds do not match the scene".to_owned());
         }
@@ -714,32 +961,34 @@ pub fn finalize_text_layout(session_id: u64) -> Result<String, String> {
         let session = sessions.get_mut(&session_id).ok_or("unknown session")?;
         if let SceneDocument::TwoD(scene) = &mut session.document.scene {
             if scene.entities.iter().any(|entity| {
-                matches!(entity.geometry, Entity2DGeometry::Text { .. })
+                matches!(entity.geometry, Entity2DGeometry::Text(_))
                     && !session.text_layout_bounds.contains_key(&entity.id)
             }) {
                 return Err("text layout is incomplete".to_owned());
             }
-            let bounds_for = |entity: &cad_core::Entity2D| {
-                session
-                    .text_layout_bounds
-                    .get(&entity.id)
-                    .copied()
-                    .or_else(|| entity.bounds())
-            };
-            scene.bounds = scene.entities.iter().filter_map(bounds_for).fold(
-                None,
-                |acc: Option<Bounds2>, next| {
-                    Some(match acc {
-                        None => next,
-                        Some(mut current) => {
-                            current.include(next.min);
-                            current.include(next.max);
-                            current
-                        }
-                    })
-                },
-            );
-            session.spatial_index = Some(SceneIndex2D::build_with_bounds(scene, bounds_for));
+            if !session.text_layout_bounds.is_empty() {
+                let bounds_for = |entity: &cad_core::Entity2D| {
+                    session
+                        .text_layout_bounds
+                        .get(&entity.id)
+                        .copied()
+                        .or_else(|| entity.bounds())
+                };
+                scene.bounds = scene.entities.iter().filter_map(bounds_for).fold(
+                    None,
+                    |acc: Option<Bounds2>, next| {
+                        Some(match acc {
+                            None => next,
+                            Some(mut current) => {
+                                current.include(next.min);
+                                current.include(next.max);
+                                current
+                            }
+                        })
+                    },
+                );
+                session.spatial_index = Some(SceneIndex2D::build_with_bounds(scene, bounds_for));
+            }
         }
     }
     document_summary(session_id)
@@ -768,7 +1017,69 @@ pub fn viewport_document(
     )
 }
 
-#[flutter_rust_bridge::frb(sync)]
+fn scene_packet_internal(session_id: u64, viewport: Option<Bounds2>) -> Result<Vec<u8>, String> {
+    let sessions = SESSIONS.read();
+    let session = sessions.get(&session_id).ok_or("unknown session")?;
+    let SceneDocument::TwoD(scene) = &session.document.scene else {
+        return Err("packed viewport requires a 2D scene".to_owned());
+    };
+    let visible = scene
+        .layers
+        .iter()
+        .filter(|l| l.visible)
+        .map(|l| l.id)
+        .collect::<HashSet<_>>();
+    let entities = if let Some((bounds, index)) = viewport.zip(session.spatial_index.as_ref()) {
+        index
+            .query_indices(bounds)
+            .into_iter()
+            .map(|i| &scene.entities[i])
+            .filter(|e| visible.contains(&e.layer_id))
+            .collect::<Vec<_>>()
+    } else {
+        scene
+            .entities
+            .iter()
+            .filter(|e| visible.contains(&e.layer_id))
+            .collect()
+    };
+    // Metadata and geometry are taken under the SAME read lock/generation.
+    crate::scene_packet::encode_2d(&serialize_session_view(session, None, false)?, &entities)
+}
+
+pub fn document_packet(session_id: u64) -> Result<Vec<u8>, String> {
+    let sessions = SESSIONS.read();
+    let session = sessions.get(&session_id).ok_or("unknown session")?;
+    if let SceneDocument::ThreeD(scene) = &session.document.scene {
+        return crate::scene_packet::encode_3d(
+            &serialize_session_view(session, None, false)?,
+            &scene.meshes,
+        );
+    }
+    // Do not recursively acquire a read lock: a queued writer could block it.
+    drop(sessions);
+    scene_packet_internal(session_id, None)
+}
+
+pub fn viewport_packet(
+    session_id: u64,
+    min_x: f64,
+    min_y: f64,
+    max_x: f64,
+    max_y: f64,
+) -> Result<Vec<u8>, String> {
+    if ![min_x, min_y, max_x, max_y].into_iter().all(f64::is_finite) {
+        return Err("viewport bounds must be finite".to_owned());
+    }
+    scene_packet_internal(
+        session_id,
+        Some(Bounds2 {
+            min: Point2::new(min_x.min(max_x), min_y.min(max_y)),
+            max: Point2::new(min_x.max(max_x), min_y.max(max_y)),
+        }),
+    )
+}
+
 pub fn close_document(session_id: u64) -> bool {
     VIEWPORTS
         .write()
@@ -894,13 +1205,14 @@ pub fn set_visibilities(session_id: u64, changes: Vec<VisibilityChange>) -> Resu
     serialize_session_document(session_id, None, false)
 }
 
-#[flutter_rust_bridge::frb(sync)]
+/// Run candidate geometry checks on a bridge worker, never the UI thread.
 pub fn hit_test(
     session_id: u64,
     x: f64,
     y: f64,
     tolerance: f64,
 ) -> Result<Option<HitResult>, String> {
+    validate_pick(x, y, tolerance)?;
     let sessions = SESSIONS.read();
     let session = sessions
         .get(&session_id)
@@ -911,10 +1223,9 @@ pub fn hit_test(
     let target = Point2::new(x, y);
     let tolerance = tolerance.abs();
     let candidates = spatial_candidates(session, target, tolerance);
-    Ok(scene
-        .entities
-        .iter()
-        .filter(|entity| candidates.contains(&entity.id))
+    Ok(candidates
+        .into_iter()
+        .filter_map(|index| scene.entities.get(index))
         .filter(|entity| {
             scene
                 .layers
@@ -933,6 +1244,78 @@ pub fn hit_test(
             distance,
             entity_kind: entity_kind(&entity.geometry).to_owned(),
         }))
+}
+
+#[derive(Debug, Clone)]
+pub struct RayHitResult {
+    pub mesh_id: u64,
+    pub triangle_index: u64,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub distance: f64,
+}
+
+/// Worker-isolate ray pick against the retained, unsampled source triangles.
+pub fn hit_test_ray(
+    session_id: u64,
+    ox: f64,
+    oy: f64,
+    oz: f64,
+    dx: f64,
+    dy: f64,
+    dz: f64,
+) -> Result<Option<RayHitResult>, String> {
+    if ![ox, oy, oz, dx, dy, dz].into_iter().all(f64::is_finite) || dx.hypot(dy).hypot(dz) == 0.0 {
+        return Err("invalid picking ray".to_owned());
+    }
+    let sessions = SESSIONS.read();
+    let session = sessions.get(&session_id).ok_or("unknown session")?;
+    let SceneDocument::ThreeD(scene) = &session.document.scene else {
+        return Ok(None);
+    };
+    let Some(index) = &session.spatial_index_3d else {
+        return Ok(None);
+    };
+    fn visible_meshes(nodes: &[cad_core::AssemblyNode], ids: &mut HashSet<u64>) {
+        for node in nodes.iter().filter(|node| node.visible) {
+            ids.extend(&node.mesh_ids);
+            visible_meshes(&node.children, ids);
+        }
+    }
+    let mut visible = HashSet::new();
+    visible_meshes(&scene.root_nodes, &mut visible);
+    let origin = Point3::new(ox, oy, oz);
+    let direction = Point3::new(dx, dy, dz);
+    let mut nearest: Option<RayHitResult> = None;
+    for (mesh_index, triangle_index) in index.ray_candidates(origin, direction) {
+        let mesh = &scene.meshes[mesh_index];
+        if !visible.contains(&mesh.id) {
+            continue;
+        }
+        let triangle = &mesh.indices[triangle_index * 3..triangle_index * 3 + 3];
+        let Some(distance) = cad_core::ray_triangle_distance(
+            origin,
+            direction,
+            mesh.positions[triangle[0] as usize],
+            mesh.positions[triangle[1] as usize],
+            mesh.positions[triangle[2] as usize],
+        ) else {
+            continue;
+        };
+        if nearest.as_ref().is_some_and(|hit| distance >= hit.distance) {
+            continue;
+        }
+        nearest = Some(RayHitResult {
+            mesh_id: mesh.id,
+            triangle_index: triangle_index as u64,
+            x: ox + dx * distance,
+            y: oy + dy * distance,
+            z: oz + dz * distance,
+            distance,
+        });
+    }
+    Ok(nearest)
 }
 
 #[flutter_rust_bridge::frb(sync)]
@@ -973,8 +1356,8 @@ pub fn entity_count_summary(
     }))
 }
 
-#[flutter_rust_bridge::frb(sync)]
 pub fn snap(session_id: u64, x: f64, y: f64, tolerance: f64) -> Result<Option<SnapResult>, String> {
+    validate_pick(x, y, tolerance)?;
     let sessions = SESSIONS.read();
     let session = sessions
         .get(&session_id)
@@ -985,10 +1368,9 @@ pub fn snap(session_id: u64, x: f64, y: f64, tolerance: f64) -> Result<Option<Sn
     let target = Point2::new(x, y);
     let tolerance = tolerance.abs();
     let candidates = spatial_candidates(session, target, tolerance);
-    let entities = scene
-        .entities
-        .iter()
-        .filter(|entity| candidates.contains(&entity.id))
+    let entities = candidates
+        .into_iter()
+        .filter_map(|index| scene.entities.get(index))
         .filter(|entity| {
             scene
                 .layers
@@ -1000,11 +1382,18 @@ pub fn snap(session_id: u64, x: f64, y: f64, tolerance: f64) -> Result<Option<Sn
         .collect::<Vec<_>>();
     let explicit = entities
         .iter()
-        .flat_map(|(entity_id, geometry)| snap_points(*entity_id, geometry))
-        .map(|(entity_id, point, kind)| (entity_id, point, kind, distance_2d(target, point)))
-        .filter(|(_, _, _, distance)| *distance <= tolerance)
+        .filter_map(|(entity_id, geometry)| {
+            nearest_snap_point(*entity_id, geometry, target, tolerance)
+        })
         .min_by(|(_, _, _, a), (_, _, _, b)| a.total_cmp(b));
-    let intersection = nearest_intersection(&entities, target, tolerance);
+    // A crossing cannot beat an exact endpoint/vertex. Otherwise its search
+    // radius only needs to reach the already-known nearest explicit point.
+    let limit = explicit.as_ref().map_or(tolerance, |point| point.3);
+    let intersection = if explicit.is_some() && limit == 0.0 {
+        None
+    } else {
+        nearest_intersection(&entities, target, limit)
+    };
     Ok(explicit
         .into_iter()
         .chain(intersection)
@@ -1023,13 +1412,13 @@ pub fn snap(session_id: u64, x: f64, y: f64, tolerance: f64) -> Result<Option<Sn
 /// This is separate from [`snap`] so tools that explicitly collect a boundary
 /// can prefer a crossing without changing the nearest-snap behaviour used by
 /// distance, coordinate and editing tools.
-#[flutter_rust_bridge::frb(sync)]
 pub fn snap_intersection(
     session_id: u64,
     x: f64,
     y: f64,
     tolerance: f64,
 ) -> Result<Option<SnapResult>, String> {
+    validate_pick(x, y, tolerance)?;
     let sessions = SESSIONS.read();
     let session = sessions
         .get(&session_id)
@@ -1040,10 +1429,9 @@ pub fn snap_intersection(
     let target = Point2::new(x, y);
     let tolerance = tolerance.abs();
     let candidates = spatial_candidates(session, target, tolerance);
-    let entities = scene
-        .entities
-        .iter()
-        .filter(|entity| candidates.contains(&entity.id))
+    let entities = candidates
+        .into_iter()
+        .filter_map(|index| scene.entities.get(index))
         .filter(|entity| {
             scene
                 .layers
@@ -1064,22 +1452,34 @@ pub fn snap_intersection(
     ))
 }
 
-fn spatial_candidates(
-    session: &DocumentSession,
-    target: Point2,
-    tolerance: f64,
-) -> std::collections::HashSet<u64> {
+fn validate_pick(x: f64, y: f64, tolerance: f64) -> Result<(), String> {
+    if [
+        x,
+        y,
+        tolerance,
+        x - tolerance,
+        x + tolerance,
+        y - tolerance,
+        y + tolerance,
+    ]
+    .into_iter()
+    .all(f64::is_finite)
+    {
+        Ok(())
+    } else {
+        Err("invalid pick coordinates or tolerance".to_owned())
+    }
+}
+
+fn spatial_candidates(session: &DocumentSession, target: Point2, tolerance: f64) -> Vec<usize> {
     session
         .spatial_index
         .as_ref()
         .map(|index| {
-            index
-                .query(Bounds2 {
-                    min: Point2::new(target.x - tolerance, target.y - tolerance),
-                    max: Point2::new(target.x + tolerance, target.y + tolerance),
-                })
-                .into_iter()
-                .collect()
+            index.query_indices(Bounds2 {
+                min: Point2::new(target.x - tolerance, target.y - tolerance),
+                max: Point2::new(target.x + tolerance, target.y + tolerance),
+            })
         })
         .unwrap_or_default()
 }
@@ -1356,7 +1756,10 @@ fn entity_distance(geometry: &Entity2DGeometry, target: Point2) -> Option<f64> {
                 Some(distance_2d(target, start).min(distance_2d(target, end)))
             }
         }
-        Entity2DGeometry::Text { origin, .. } => Some(distance_2d(*origin, target)),
+        Entity2DGeometry::Text(text_geometry) => {
+            let TextGeometry2D { origin, .. } = &**text_geometry;
+            Some(distance_2d(*origin, target))
+        }
     }
 }
 
@@ -1371,46 +1774,50 @@ fn point_segment_distance(point: Point2, start: Point2, end: Point2) -> f64 {
     distance_2d(point, Point2::new(start.x + t * dx, start.y + t * dy))
 }
 
-fn snap_points(entity_id: u64, geometry: &Entity2DGeometry) -> Vec<(u64, Point2, String)> {
-    match geometry {
-        Entity2DGeometry::Point { position } => vec![(entity_id, *position, "point".to_owned())],
-        Entity2DGeometry::Line { start, end } => vec![
-            (entity_id, *start, "endpoint".to_owned()),
-            (entity_id, *end, "endpoint".to_owned()),
-            (
-                entity_id,
-                Point2::new((start.x + end.x) / 2.0, (start.y + end.y) / 2.0),
-                "midpoint".to_owned(),
-            ),
-        ],
-        Entity2DGeometry::Polyline { points, .. } => points
-            .iter()
-            .copied()
-            .map(|point| (entity_id, point, "vertex".to_owned()))
-            .collect(),
-        Entity2DGeometry::Circle { center, .. } => {
-            vec![(entity_id, *center, "center".to_owned())]
+fn nearest_snap_point(
+    entity_id: u64,
+    geometry: &Entity2DGeometry,
+    target: Point2,
+    tolerance: f64,
+) -> Option<(u64, Point2, String, f64)> {
+    // Scan borrowed vertices instead of allocating a point+String for every
+    // vertex of a large polyline on every pointer move.
+    let mut best: Option<(Point2, &'static str, f64)> = None;
+    let mut consider = |point: Point2, kind: &'static str| {
+        let distance = distance_2d(target, point);
+        if distance <= tolerance && best.as_ref().is_none_or(|b| distance < b.2) {
+            best = Some((point, kind, distance));
         }
+    };
+    match geometry {
+        Entity2DGeometry::Point { position } => consider(*position, "point"),
+        Entity2DGeometry::Line { start, end } => {
+            consider(*start, "endpoint");
+            consider(*end, "endpoint");
+            consider(
+                Point2::new(start.x * 0.5 + end.x * 0.5, start.y * 0.5 + end.y * 0.5),
+                "midpoint",
+            );
+        }
+        Entity2DGeometry::Polyline { points, .. } => {
+            for point in points {
+                consider(*point, "vertex");
+            }
+        }
+        Entity2DGeometry::Circle { center, .. } => consider(*center, "center"),
         Entity2DGeometry::Arc {
             center,
             radius,
             start_angle,
             end_angle,
-        } => vec![
-            (entity_id, *center, "center".to_owned()),
-            (
-                entity_id,
-                point_on_circle(*center, *radius, *start_angle),
-                "endpoint".to_owned(),
-            ),
-            (
-                entity_id,
-                point_on_circle(*center, *radius, *end_angle),
-                "endpoint".to_owned(),
-            ),
-        ],
-        Entity2DGeometry::Text { origin, .. } => vec![(entity_id, *origin, "insertion".to_owned())],
+        } => {
+            consider(*center, "center");
+            consider(point_on_circle(*center, *radius, *start_angle), "endpoint");
+            consider(point_on_circle(*center, *radius, *end_angle), "endpoint");
+        }
+        Entity2DGeometry::Text(text) => consider(text.origin, "insertion"),
     }
+    best.map(|(point, kind, distance)| (entity_id, point, kind.to_owned(), distance))
 }
 
 #[derive(Clone, Copy)]
@@ -1429,6 +1836,54 @@ enum SnapCurve {
 }
 
 impl SnapCurve {
+    fn key(self) -> [u64; 7] {
+        fn bits(value: f64) -> u64 {
+            if value == 0.0 {
+                0
+            } else {
+                value.to_bits()
+            }
+        }
+        match self {
+            Self::Segment { start, end, .. } => {
+                let a = [bits(start.x), bits(start.y)];
+                let b = [bits(end.x), bits(end.y)];
+                let (a, b) = if a <= b { (a, b) } else { (b, a) };
+                [0, a[0], a[1], b[0], b[1], 0, 0]
+            }
+            Self::Circular {
+                center,
+                radius,
+                arc,
+                ..
+            } => {
+                let (kind, start, end) = arc.map_or((1, 0.0, 0.0), |(s, e)| (2, s, e));
+                [
+                    kind,
+                    bits(center.x),
+                    bits(center.y),
+                    bits(radius),
+                    bits(start),
+                    bits(end),
+                    0,
+                ]
+            }
+        }
+    }
+
+    fn bounds(self) -> Bounds2 {
+        match self {
+            Self::Segment { start, end, .. } => Bounds2 {
+                min: Point2::new(start.x.min(end.x), start.y.min(end.y)),
+                max: Point2::new(start.x.max(end.x), start.y.max(end.y)),
+            },
+            Self::Circular { center, radius, .. } => Bounds2 {
+                min: Point2::new(center.x - radius, center.y - radius),
+                max: Point2::new(center.x + radius, center.y + radius),
+            },
+        }
+    }
+
     fn entity_id(self) -> u64 {
         match self {
             Self::Segment { entity_id, .. } | Self::Circular { entity_id, .. } => entity_id,
@@ -1459,35 +1914,60 @@ fn nearest_intersection(
     target: Point2,
     tolerance: f64,
 ) -> Option<(u64, Point2, String, f64)> {
-    // Only curves that pass through the pointer tolerance can contribute a
-    // relevant intersection. Keep the nearest curves instead of the first
-    // curves in scene order so dense hatches cannot hide a real intersection.
-    // The cap still prevents a pathological drawing from causing unbounded
-    // O(n²) pair checks.
+    // A fixed nearest-curve cap loses real crossings: hundreds of nearby
+    // parallel hatch lines can exclude the one transverse boundary. Retain
+    // every nearby curve, deduplicate exact coincident geometry and use local
+    // envelopes plus distance lower bounds to avoid irrelevant pair checks.
     let mut curves = Vec::new();
     for (entity_id, geometry) in entities {
         append_nearby_curves(&mut curves, *entity_id, geometry, target, tolerance);
-        if curves.len() > 1024 {
-            curves.sort_by(|first, second| {
-                first
-                    .distance_to(target)
-                    .total_cmp(&second.distance_to(target))
-            });
-            curves.truncate(512);
-        }
     }
-    curves.sort_by(|first, second| {
-        first
-            .distance_to(target)
-            .total_cmp(&second.distance_to(target))
-    });
-    curves.truncate(256);
+    let mut seen = HashSet::new();
+    curves.retain(|curve| seen.insert(curve.key()));
+    drop(seen);
+    let mut curves = curves
+        .into_iter()
+        .map(|curve| (curve, curve.distance_to(target)))
+        .collect::<Vec<_>>();
+    curves.sort_by(|a, b| a.1.total_cmp(&b.1));
+    if curves.len() < 2 {
+        return None;
+    }
+    let index = SceneIndex2D::from_bounds(curves.iter().map(|(curve, _)| curve.bounds()));
 
     let mut best: Option<(u64, Point2, String, f64)> = None;
     for first_index in 0..curves.len() {
-        for second_index in first_index + 1..curves.len() {
-            let first = curves[first_index];
-            let second = curves[second_index];
+        let limit = best.as_ref().map_or(tolerance, |best| best.3);
+        // Expand lower-bound comparisons for floating-point roundoff. Exact
+        // candidate points still have to satisfy the original pick aperture.
+        let margin =
+            32.0 * f64::EPSILON * target.x.abs().max(target.y.abs()).max(tolerance).max(1.0);
+        if curves[first_index].1 > limit + margin {
+            break;
+        }
+        let first = curves[first_index].0;
+        let bounds = first.bounds();
+        let query = Bounds2 {
+            min: Point2::new(
+                bounds.min.x.max(target.x - limit - margin),
+                bounds.min.y.max(target.y - limit - margin),
+            ),
+            max: Point2::new(
+                bounds.max.x.min(target.x + limit + margin),
+                bounds.max.y.min(target.y + limit + margin),
+            ),
+        };
+        if query.min.x > query.max.x || query.min.y > query.max.y {
+            continue;
+        }
+        for second_index in index.query_indices(query) {
+            if second_index <= first_index {
+                continue;
+            }
+            if curves[second_index].1 > limit + margin {
+                break;
+            }
+            let second = curves[second_index].0;
             for point in curve_intersections(first, second) {
                 if !first.contains(point) || !second.contains(point) {
                     continue;
@@ -1564,7 +2044,7 @@ fn append_nearby_curves(
                 });
             }
         }
-        Entity2DGeometry::Point { .. } | Entity2DGeometry::Text { .. } => {}
+        Entity2DGeometry::Point { .. } | Entity2DGeometry::Text(_) => {}
     }
 }
 
@@ -1719,7 +2199,7 @@ fn entity_kind(geometry: &Entity2DGeometry) -> &'static str {
         Entity2DGeometry::Polyline { .. } => "polyline",
         Entity2DGeometry::Circle { .. } => "circle",
         Entity2DGeometry::Arc { .. } => "arc",
-        Entity2DGeometry::Text { .. } => "text",
+        Entity2DGeometry::Text(_) => "text",
     }
 }
 
@@ -1752,7 +2232,7 @@ fn entity_length(geometry: &Entity2DGeometry) -> Option<f64> {
             radius.abs() * normalized_arc_sweep(*start_angle, *end_angle)
         }
         Entity2DGeometry::Point { .. }
-        | Entity2DGeometry::Text { .. }
+        | Entity2DGeometry::Text(_)
         | Entity2DGeometry::Polyline { .. }
         | Entity2DGeometry::Circle { .. }
         | Entity2DGeometry::Arc { .. } => return None,
@@ -1775,7 +2255,7 @@ fn entity_area(geometry: &Entity2DGeometry) -> Option<f64> {
         | Entity2DGeometry::Polyline { .. }
         | Entity2DGeometry::Circle { .. }
         | Entity2DGeometry::Arc { .. }
-        | Entity2DGeometry::Text { .. } => None,
+        | Entity2DGeometry::Text(_) => None,
     }
 }
 
@@ -1852,6 +2332,154 @@ mod tests {
     use super::*;
     use cad_core::{DocumentMetadata, Entity2D, Scene2D};
 
+    /// Release-mode, opt-in benchmark of the real open/viewport/pick APIs.
+    /// Run in isolation: CADVIEW_PERF_FILE=/absolute/file cargo test --release
+    /// performance_file -- --ignored --nocapture --test-threads=1
+    #[test]
+    #[ignore = "requires an explicitly selected local performance corpus"]
+    fn performance_file() {
+        use std::time::Instant;
+        let path = std::env::var("CADVIEW_PERF_FILE").expect("CADVIEW_PERF_FILE");
+        let cache = std::env::var("CADVIEW_PERF_CACHE").ok();
+        if let Some(cache) = cache {
+            configure_cache(cache).unwrap();
+        }
+        let start = Instant::now();
+        let opened = open_document(path.clone()).unwrap();
+        let cold_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let initial_json_bytes = opened.document_json.len();
+        if let Ok(output) = std::env::var("CADVIEW_PERF_DOCUMENT_JSON") {
+            std::fs::write(output, &opened.document_json).unwrap();
+        }
+        let (bounds, triangles, pick_targets) = {
+            let sessions = SESSIONS.read();
+            match &sessions[&opened.session_id].document.scene {
+                SceneDocument::TwoD(scene) => {
+                    let hidden = scene
+                        .layers
+                        .iter()
+                        .filter(|layer| !layer.visible)
+                        .map(|layer| layer.id)
+                        .collect::<HashSet<_>>();
+                    // Sample actual visible geometry. A fixed grid can land
+                    // entirely in empty areas of tiled engineering drawings,
+                    // giving misleading near-zero hit/snap timings.
+                    let targets = scene
+                        .entities
+                        .iter()
+                        .filter(|entity| !hidden.contains(&entity.layer_id))
+                        .filter_map(|entity| match &entity.geometry {
+                            Entity2DGeometry::Line { start, .. } => Some(*start),
+                            Entity2DGeometry::Point { position } => Some(*position),
+                            Entity2DGeometry::Polyline { points, .. } => points.first().copied(),
+                            _ => None,
+                        })
+                        .step_by((scene.entities.len() / 100).max(1))
+                        .take(100)
+                        .collect::<Vec<_>>();
+                    (scene.bounds, 0, targets)
+                }
+                SceneDocument::ThreeD(scene) => (None, scene.stats.triangle_count, Vec::new()),
+                _ => (None, 0, Vec::new()),
+            }
+        };
+        let mut full_packet_bytes = 0;
+        let mut full_packet_ms = 0.0;
+        if (bounds.is_some() || triangles > 0) && std::env::var_os("CADVIEW_PERF_PACKET").is_some()
+        {
+            let start = Instant::now();
+            let packet = document_packet(opened.session_id).unwrap();
+            full_packet_ms = start.elapsed().as_secs_f64() * 1000.0;
+            full_packet_bytes = packet.len();
+            std::fs::write(std::env::var("CADVIEW_PERF_PACKET").unwrap(), packet).unwrap();
+        }
+        let mut viewport = Vec::new();
+        let mut hit = Vec::new();
+        let mut snaps = Vec::new();
+        let mut hit_count = 0;
+        let mut snap_count = 0;
+        let mut viewport_bytes = 0;
+        if let Some(bounds) = bounds {
+            let width = bounds.max.x - bounds.min.x;
+            let height = bounds.max.y - bounds.min.y;
+            assert!(
+                !pick_targets.is_empty(),
+                "benchmark requires visible point/line/polyline geometry"
+            );
+            for target in &pick_targets {
+                let (x, y) = (target.x, target.y);
+                let start = Instant::now();
+                let json =
+                    viewport_document(opened.session_id, x, y, x + width * 0.01, y + height * 0.01)
+                        .unwrap();
+                viewport.push(start.elapsed().as_secs_f64() * 1000.0);
+                viewport_bytes = json.len();
+                let start = Instant::now();
+                hit_count += u64::from(hit_test(opened.session_id, x, y, 0.01).unwrap().is_some());
+                hit.push(start.elapsed().as_secs_f64() * 1000.0);
+                let start = Instant::now();
+                snap_count += u64::from(snap(opened.session_id, x, y, 0.01).unwrap().is_some());
+                snaps.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            assert_eq!(hit_count, pick_targets.len() as u64);
+            assert_eq!(snap_count, pick_targets.len() as u64);
+        }
+        let mut ray_times = Vec::new();
+        let mut ray_hits = 0;
+        if triangles > 0 {
+            let bounds = {
+                let sessions = SESSIONS.read();
+                let SceneDocument::ThreeD(scene) = &sessions[&opened.session_id].document.scene
+                else {
+                    unreachable!()
+                };
+                scene.bounds.unwrap()
+            };
+            for step in 0..100 {
+                let x = bounds.min.x
+                    + (bounds.max.x - bounds.min.x) * (0.1 + (step % 80) as f64 / 100.0);
+                let y = (bounds.min.y + bounds.max.y) * 0.5;
+                let z = bounds.max.z + (bounds.max.z - bounds.min.z).max(1.0);
+                let start = Instant::now();
+                if hit_test_ray(opened.session_id, x, y, z, 0.0, 0.0, -1.0)
+                    .unwrap()
+                    .is_some()
+                {
+                    ray_hits += 1;
+                }
+                ray_times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        fn p95(values: &mut [f64]) -> Option<f64> {
+            values.sort_by(f64::total_cmp);
+            values
+                .get(values.len().saturating_sub(values.len() / 20 + 1))
+                .copied()
+        }
+        let entity_count = opened.total_entity_count;
+        close_document(opened.session_id);
+        drop(opened);
+        let start = Instant::now();
+        let reopened = open_document(path.clone()).unwrap();
+        let warm_ms = start.elapsed().as_secs_f64() * 1000.0;
+        close_document(reopened.session_id);
+        println!(
+            "PERFORMANCE {}",
+            serde_json::json!({
+            "path":path, "bytes":std::fs::metadata(&path).unwrap().len(),
+            "entity_stride_bytes":std::mem::size_of::<cad_core::Entity2D>(),
+                "entities":entity_count, "triangles":triangles,
+                "first_open_ms":cold_ms, "reopen_ms":warm_ms,
+                "initial_json_bytes":initial_json_bytes, "viewport_json_bytes":viewport_bytes,
+                "full_packet_bytes":full_packet_bytes, "full_packet_ms":full_packet_ms,
+                "viewport_p95_ms":p95(&mut viewport), "hit_p95_ms":p95(&mut hit), "snap_p95_ms":p95(&mut snaps),
+            "ray_p95_ms":p95(&mut ray_times), "ray_hits":ray_hits,
+                "hit_count":hit_count, "snap_count":snap_count,
+                "query_count":pick_targets.len(),
+            })
+        );
+    }
+
     #[test]
     fn format_registry_is_exposed() {
         let formats = supported_formats();
@@ -1861,6 +2489,174 @@ mod tests {
         assert!(formats.iter().any(|format| {
             format.id == "dwg" && format.available && format.support_level == "beta"
         }));
+    }
+
+    #[test]
+    fn packed_scene_matches_legacy_geometry_metadata_order_and_visibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("packed.dxf");
+        std::fs::write(&path, "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1032\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nPOINT\n8\n0\n10\n5\n20\n6\n0\nLINE\n8\n0\n10\n1000000000000.125\n20\n15\n11\n1000000000004.125\n21\n15\n0\nLWPOLYLINE\n8\n0\n90\n3\n70\n1\n10\n0\n20\n0\n10\n10\n20\n0\n10\n5\n20\n8\n0\nCIRCLE\n8\n0\n10\n5\n20\n5\n40\n2.5\n0\nARC\n8\n0\n10\n5\n20\n5\n40\n3\n50\n10\n51\n210\n0\nTEXT\n8\n0\n10\n5\n20\n5\n40\n2\n1\n中文⌀42\n0\nENDSEC\n0\nEOF\n").unwrap();
+        let opened = open_document(path.to_string_lossy().into_owned()).unwrap();
+        let id = opened.session_id;
+        {
+            let mut sessions = SESSIONS.write();
+            let SceneDocument::TwoD(scene) = &mut sessions.get_mut(&id).unwrap().document.scene
+            else {
+                panic!()
+            };
+            scene.entities[1].dash = vec![4.0, -2.0, 0.0];
+            scene.entities[2].filled = true;
+            scene.entities[2].stroke_width = 1.25;
+        }
+        let legacy: serde_json::Value =
+            serde_json::from_str(&serialize_session_document(id, None, true).unwrap()).unwrap();
+        let packed = crate::scene_packet::tests::decode(&document_packet(id).unwrap());
+        assert_eq!(packed, legacy);
+        assert_eq!(
+            packed["scene"]["scene"]["entities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            6
+        );
+        for bounds in [[-10.0, -10.0, 20.0, 20.0], [1e12, 0.0, 1e12 + 10.0, 30.0]] {
+            let expected: serde_json::Value = serde_json::from_str(
+                &viewport_document(id, bounds[0], bounds[1], bounds[2], bounds[3]).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::scene_packet::tests::decode(
+                    &viewport_packet(id, bounds[0], bounds[1], bounds[2], bounds[3]).unwrap()
+                ),
+                expected
+            );
+        }
+        let layer = packed["scene"]["scene"]["layers"][0]["id"]
+            .as_u64()
+            .unwrap();
+        set_visibility(id, layer, false).unwrap();
+        let hidden = crate::scene_packet::tests::decode(&document_packet(id).unwrap());
+        assert!(hidden["scene"]["scene"]["entities"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(viewport_packet(id, f64::NAN, 0.0, 1.0, 1.0).is_err());
+        close_document(id);
+        assert!(document_packet(id).is_err());
+    }
+
+    #[test]
+    fn compact_mesh_open_keeps_exact_legacy_scene_without_initial_geometry_json() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("compact.obj");
+        std::fs::write(&path, "o exact\nv 1000000000000.125 0 0\nv 1000000000001.125 0 0\nv 1000000000000.125 1 0\nf 3 1 2\n").unwrap();
+        let opened = open_document_internal(
+            path.to_string_lossy().into_owned(),
+            &CancellationToken::default(),
+            None,
+            true,
+        )
+        .unwrap();
+        let id = opened.session_id;
+        assert_eq!(opened.scene_kind, "three_d");
+        let summary: serde_json::Value = serde_json::from_str(&opened.document_json).unwrap();
+        assert!(summary["scene"]["scene"]["meshes"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let legacy: serde_json::Value =
+            serde_json::from_str(&serialize_session_document(id, None, true).unwrap()).unwrap();
+        assert_eq!(
+            crate::scene_packet::tests::decode_3d(&document_packet(id).unwrap()),
+            legacy
+        );
+        let node = summary["scene"]["scene"]["root_nodes"][0]["id"]
+            .as_u64()
+            .unwrap();
+        set_visibility(id, node, false).unwrap();
+        let hidden = crate::scene_packet::tests::decode_3d(&document_packet(id).unwrap());
+        assert_eq!(
+            hidden["scene"]["scene"]["meshes"],
+            legacy["scene"]["scene"]["meshes"]
+        );
+        assert_eq!(hidden["scene"]["scene"]["root_nodes"][0]["visible"], false);
+        assert!(viewport_packet(id, 0.0, 0.0, 1.0, 1.0).is_err());
+        close_document(id);
+        assert!(document_packet(id).is_err());
+    }
+
+    #[test]
+    fn indexed_ray_pick_matches_exact_brute_force_and_assembly_visibility() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ray.obj");
+        std::fs::write(&path, "o back\nv 0 0 0\nv 10 0 0\nv 0 10 0\nf 1 2 3\no front\nv 0 0 2\nv 10 0 2\nv 0 10 2\nf 4 5 6\n").unwrap();
+        let opened = open_document(path.to_string_lossy().into_owned()).unwrap();
+        let id = opened.session_id;
+        for x in [-1.0, 0.0, 1.0, 5.0, 10.0, 11.0] {
+            for y in [-1.0, 0.0, 1.0, 5.0, 10.0, 11.0] {
+                let expected = {
+                    let sessions = SESSIONS.read();
+                    let SceneDocument::ThreeD(scene) = &sessions[&id].document.scene else {
+                        panic!()
+                    };
+                    scene
+                        .meshes
+                        .iter()
+                        .flat_map(|mesh| {
+                            mesh.indices
+                                .chunks_exact(3)
+                                .enumerate()
+                                .filter_map(move |(i, t)| {
+                                    cad_core::ray_triangle_distance(
+                                        Point3::new(x, y, 5.0),
+                                        Point3::new(0.0, 0.0, -1.0),
+                                        mesh.positions[t[0] as usize],
+                                        mesh.positions[t[1] as usize],
+                                        mesh.positions[t[2] as usize],
+                                    )
+                                    .map(|d| (mesh.id, i as u64, d))
+                                })
+                        })
+                        .min_by(|a, b| a.2.total_cmp(&b.2))
+                };
+                let actual = hit_test_ray(id, x, y, 5.0, 0.0, 0.0, -1.0).unwrap();
+                assert_eq!(
+                    actual.map(|hit| (hit.mesh_id, hit.triangle_index, hit.distance)),
+                    expected
+                );
+            }
+        }
+        let hit = hit_test_ray(id, 1.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.z, 2.0);
+        assert_eq!(
+            hit_test_ray(id, 0.0, 0.0, 5.0, 0.2, 0.2, -1.0)
+                .unwrap()
+                .unwrap()
+                .z,
+            2.0
+        );
+        let summary: OpenedDocument = serde_json::from_str(&document_summary(id).unwrap()).unwrap();
+        let SceneDocument::ThreeD(summary) = summary.scene else {
+            panic!()
+        };
+        assert!(summary.meshes.is_empty());
+        assert_eq!(summary.stats.triangle_count, 2);
+        set_visibility(id, hit.mesh_id, false).unwrap();
+        assert_eq!(
+            hit_test_ray(id, 1.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+                .unwrap()
+                .unwrap()
+                .z,
+            0.0
+        );
+        set_visibility(id, 0, false).unwrap();
+        assert!(hit_test_ray(id, 1.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+            .unwrap()
+            .is_none());
+        assert!(hit_test_ray(id, 1.0, 1.0, 5.0, 0.0, 0.0, 0.0).is_err());
+        close_document(id);
     }
 
     #[test]
@@ -2074,6 +2870,7 @@ mod tests {
                 layer_entity_kind_areas: statistics.5,
                 document,
                 spatial_index: Some(SceneIndex2D::build(&scene)),
+                spatial_index_3d: None,
                 text_layout_bounds: HashMap::new(),
                 annotations: AnnotationDocument::new("test".to_owned()),
                 undo: Vec::new(),
@@ -2245,6 +3042,7 @@ mod tests {
                 layer_entity_kind_areas: statistics.5,
                 document,
                 spatial_index: None,
+                spatial_index_3d: None,
                 text_layout_bounds: HashMap::new(),
                 annotations: AnnotationDocument::new("layers-test".to_owned()),
                 undo: Vec::new(),
@@ -2363,6 +3161,7 @@ mod tests {
                 document,
                 spatial_index: Some(SceneIndex2D::build(&scene)),
                 text_layout_bounds: HashMap::new(),
+                spatial_index_3d: None,
                 annotations: AnnotationDocument::new("intersection-test".to_owned()),
                 undo: Vec::new(),
                 redo: Vec::new(),
@@ -2446,6 +3245,107 @@ mod tests {
         let on_arc = Point2::new(coordinate, coordinate);
         assert!(entity_distance(&arc, on_arc).unwrap() < 1e-10);
         assert!(entity_distance(&arc, Point2::new(-10.0, 0.0)).unwrap() > 14.0);
+    }
+
+    #[test]
+    fn transverse_boundary_is_not_lost_behind_closer_parallel_hatch_lines() {
+        for origin in [0.0, 1e12] {
+            let mut geometry = (0..600)
+                .map(|i| Entity2DGeometry::Line {
+                    start: Point2::new(origin - 2.0, origin + 0.01 + i as f64 / 10000.0),
+                    end: Point2::new(origin + 2.0, origin + 0.01 + i as f64 / 10000.0),
+                })
+                .collect::<Vec<_>>();
+            geometry.push(Entity2DGeometry::Line {
+                start: Point2::new(origin + 0.7, origin - 2.0),
+                end: Point2::new(origin + 0.7, origin + 2.0),
+            });
+            let entities = geometry
+                .iter()
+                .enumerate()
+                .map(|(i, g)| (i as u64, g))
+                .collect::<Vec<_>>();
+            let hit = nearest_intersection(&entities, Point2::new(origin, origin), 1.0).unwrap();
+            let epsilon = (origin.abs() * f64::EPSILON * 2.0).max(1e-12);
+            assert!((hit.1.x - (origin + 0.7)).abs() <= epsilon);
+            assert!((hit.1.y - (origin + 0.01)).abs() <= epsilon);
+            assert_eq!(hit.0, 0);
+        }
+    }
+
+    #[test]
+    fn indexed_crossings_match_exhaustive_pairs_in_dense_mixed_geometry() {
+        let mut geometries = (0..280)
+            .map(|i| {
+                let a = i as f64 * 0.317;
+                Entity2DGeometry::Line {
+                    start: Point2::new(a.cos() * 3.0, a.sin() * 3.0),
+                    end: Point2::new((a + 0.3).sin() * 4.0, (a + 0.2).cos() * 4.0),
+                }
+            })
+            .collect::<Vec<_>>();
+        for i in 0..20 {
+            geometries.push(Entity2DGeometry::Arc {
+                center: Point2::new(i as f64 * 0.1 - 1.0, 0.0),
+                radius: 0.3 + i as f64 * 0.02,
+                start_angle: 0.0,
+                end_angle: std::f64::consts::PI,
+            });
+        }
+        let entities = geometries
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (i as u64, g))
+            .collect::<Vec<_>>();
+        for i in 0..20 {
+            let target = Point2::new(i as f64 * 0.13 - 1.0, 0.123);
+            let mut curves = Vec::new();
+            for (id, geometry) in &entities {
+                append_nearby_curves(&mut curves, *id, geometry, target, 1.0);
+            }
+            let mut expected = f64::INFINITY;
+            for (a, first) in curves.iter().enumerate() {
+                for second in &curves[a + 1..] {
+                    for point in curve_intersections(*first, *second) {
+                        if first.contains(point) && second.contains(point) {
+                            let distance = distance_2d(target, point);
+                            if distance <= 1.0 {
+                                expected = expected.min(distance);
+                            }
+                        }
+                    }
+                }
+            }
+            let result = nearest_intersection(&entities, target, 1.0).unwrap();
+            assert!((result.3 - expected).abs() < 1e-12, "target {target:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_pick_inputs_return_errors_without_spatial_index_panics() {
+        for (x, y, tolerance) in [
+            (f64::NAN, 0.0, 1.0),
+            (0.0, f64::INFINITY, 1.0),
+            (0.0, 0.0, f64::NAN),
+            (f64::MAX, 0.0, f64::MAX),
+        ] {
+            assert!(hit_test(0, x, y, tolerance).is_err());
+            assert!(snap(0, x, y, tolerance).is_err());
+            assert!(snap_intersection(0, x, y, tolerance).is_err());
+        }
+    }
+
+    #[test]
+    fn long_polyline_snap_keeps_the_exact_nearest_source_vertex() {
+        let geometry = Entity2DGeometry::Polyline {
+            points: (0..100_000)
+                .map(|i| Point2::new(1e12 + i as f64 * 0.25, 1e12))
+                .collect(),
+            closed: false,
+        };
+        let target = Point2::new(1e12 + 99999.0 * 0.25, 1e12);
+        let result = nearest_snap_point(37, &geometry, target, 0.01).unwrap();
+        assert_eq!(result, (37, target, "vertex".to_owned(), 0.0));
     }
 
     #[test]

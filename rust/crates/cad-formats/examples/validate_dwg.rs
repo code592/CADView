@@ -38,19 +38,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let text_count = scene
         .entities
         .iter()
-        .filter(|entity| matches!(entity.geometry, Entity2DGeometry::Text { .. }))
+        .filter(|entity| matches!(entity.geometry, Entity2DGeometry::Text(_)))
         .count();
     let aligned_text_count = scene
         .entities
         .iter()
         .filter(|entity| {
-            matches!(
-                entity.geometry,
-                Entity2DGeometry::Text {
-                    target_width: Some(_),
-                    ..
-                }
-            )
+            matches!(&entity.geometry, Entity2DGeometry::Text(text) if text.target_width.is_some())
         })
         .count();
     let filled_count = scene.entities.iter().filter(|entity| entity.filled).count();

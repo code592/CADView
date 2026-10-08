@@ -192,7 +192,8 @@ impl DwgObjectReader {
                 self.data.len()
             )));
         }
-        let merged_data = self.data[pos..pos + size].to_vec();
+        // One shared copy for the temporary, main, text and handle readers.
+        let merged_data: std::sync::Arc<[u8]> = self.data[pos..pos + size].into();
 
         // 4. For R2007+ (ThreeStream): read type_code from a temp reader,
         //    then manually construct the three sub-readers with correct
@@ -209,7 +210,7 @@ impl DwgObjectReader {
             let dwg = DwgVersion::from_dxf_version(self.dxf_version).unwrap_or(DwgVersion::AC15);
 
             // Read type_code from temp reader
-            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
+            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::shared(
                 merged_data.clone(),
                 dwg,
                 self.dxf_version,
@@ -240,24 +241,26 @@ impl DwgObjectReader {
             }
 
             // Main reader: starts at data_start_bits (after type_code [+ RL])
-            let mut main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(),
-                dwg,
-                self.dxf_version,
-            );
+            let mut main_reader =
+                crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::shared(
+                    merged_data.clone(),
+                    dwg,
+                    self.dxf_version,
+                );
             main_reader.set_position_in_bits(data_start_bits);
 
             // Text reader: positioned by flag at flag_position
-            let mut text_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-                merged_data.clone(),
-                dwg,
-                self.dxf_version,
-            );
+            let mut text_reader =
+                crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::shared(
+                    merged_data.clone(),
+                    dwg,
+                    self.dxf_version,
+                );
             text_reader.set_position_by_flag(flag_position);
 
             // Handle reader: starts at bit position handle_start (NOT byte-aligned).
             let mut handle_reader =
-                crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
+                crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::shared(
                     merged_data.clone(),
                     dwg,
                     self.dxf_version,
@@ -292,7 +295,7 @@ impl DwgObjectReader {
         let handle_start_bits = if self.version.r2000_plus() {
             // Read BS + RL from a disposable temp reader to discover
             // the split point without consuming from the final reader.
-            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
+            let mut temp = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::shared(
                 merged_data.clone(),
                 dwg,
                 self.dxf_version,
@@ -305,18 +308,19 @@ impl DwgObjectReader {
         };
 
         // Create main reader (reads from bit 0)
-        let main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
+        let main_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::shared(
             merged_data.clone(),
             dwg,
             self.dxf_version,
         );
 
         // Create handle reader positioned at handle_start_bits
-        let mut handle_reader = crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::new(
-            merged_data,
-            dwg,
-            self.dxf_version,
-        );
+        let mut handle_reader =
+            crate::io::dwg::dwg_stream_readers::bit_reader::DwgBitReader::shared(
+                merged_data,
+                dwg,
+                self.dxf_version,
+            );
         handle_reader.set_position_in_bits(handle_start_bits);
 
         let mut reader = DwgMergedReader::from_readers(

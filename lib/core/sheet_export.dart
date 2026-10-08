@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -122,10 +123,17 @@ class CadSheetRaster {
 
   ui.Size get logicalSize => ui.Size(width / ratio, height / ratio);
 
+  /// Builds the sheet's paths between frames before its tiles are rendered.
+  Future<void> prepare() => CadScenePainter.prepareDocument(document);
+
   /// Renders the pixel rectangle ([x], [y], [tileWidth] × [tileHeight]).
   Future<ui.Image> renderTile(int x, int y, int tileWidth, int tileHeight) {
     final recorder = ui.PictureRecorder();
+    // The clip also lets the painter skip geometry outside this tile.
     final canvas = ui.Canvas(recorder)
+      ..clipRect(
+        ui.Rect.fromLTWH(0, 0, tileWidth.toDouble(), tileHeight.toDouble()),
+      )
       ..translate(-x.toDouble(), -y.toDouble())
       ..scale(ratio);
     // The painter fits scene bounds into 88% of the canvas; undo that margin
@@ -194,79 +202,143 @@ int _crc32(List<int> type, List<int> data) {
   return crc ^ 0xffffffff;
 }
 
-class _ChunkSink implements Sink<List<int>> {
-  _ChunkSink(this.onData);
-  final void Function(List<int>) onData;
-  @override
-  void add(List<int> data) => onData(data);
-  @override
-  void close() {}
+/// A PNG chunk: length, type, data and CRC.
+Uint8List _pngChunk(String type, List<int> data) {
+  final typeBytes = latin1.encode(type);
+  final chunk = Uint8List(12 + data.length);
+  ByteData.sublistView(chunk).setUint32(0, data.length);
+  chunk.setRange(4, 8, typeBytes);
+  chunk.setRange(8, 8 + data.length, data);
+  ByteData.sublistView(chunk)
+      .setUint32(8 + data.length, _crc32(typeBytes, data));
+  return chunk;
 }
 
-/// Encodes the whole sheet as one RGB PNG without holding the full raster:
-/// each band of tiles is rendered, its rows are deflated into IDAT chunks and
-/// the band is released before the next one.
-Future<Uint8List> encodeSheetPng(CadSheetRaster sheet) async {
-  final output = BytesBuilder(copy: false);
-  void chunk(String type, List<int> data) {
-    final typeBytes = latin1.encode(type);
-    output
-      ..add((ByteData(4)..setUint32(0, data.length)).buffer.asUint8List())
-      ..add(typeBytes)
-      ..add(data)
-      ..add(
-        (ByteData(
-          4,
-        )..setUint32(0, _crc32(typeBytes, data))).buffer.asUint8List(),
-      );
-  }
+const _adlerBase = 65521;
 
-  output.add(const [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  chunk(
-    'IHDR',
-    (ByteData(13)
-          ..setUint32(0, sheet.width)
-          ..setUint32(4, sheet.height)
-          ..setUint8(8, 8) // bit depth
-          ..setUint8(9, 2) // RGB
-          ..setUint8(10, 0)
-          ..setUint8(11, 0)
-          ..setUint8(12, 0))
-        .buffer
-        .asUint8List(),
+int _adler32(Uint8List data) {
+  var a = 1, b = 0;
+  // 5552 bytes is the longest run whose sums cannot overflow before the
+  // modulo (as in zlib); Dart integers are 64-bit, so this is conservative.
+  for (var start = 0; start < data.length; start += 5552) {
+    final end = math.min(start + 5552, data.length);
+    for (var i = start; i < end; i++) {
+      a += data[i];
+      b += a;
+    }
+    a %= _adlerBase;
+    b %= _adlerBase;
+  }
+  return b << 16 | a;
+}
+
+/// Adler-32 of two concatenated inputs from their checksums (zlib's
+/// adler32_combine), [secondLength] being the second input's length.
+int _adler32Combine(int first, int second, int secondLength) {
+  final remainder = secondLength % _adlerBase;
+  var sum1 = first & 0xffff;
+  var sum2 = (remainder * sum1) % _adlerBase;
+  sum1 += (second & 0xffff) + _adlerBase - 1;
+  sum2 += (first >> 16) + (second >> 16) + _adlerBase - remainder;
+  sum1 %= _adlerBase;
+  sum2 %= _adlerBase;
+  return sum2 << 16 | sum1;
+}
+
+/// One band of a sheet PNG, encoded in a background isolate: the tiles'
+/// RGBA rows become filtered RGB rows, compressed as raw deflate blocks.
+/// Every band but the last ends with a sync flush, which leaves the stream
+/// byte aligned and unfinished, so the bands concatenate into one stream.
+({Uint8List idat, int adler, int length}) _encodePngBand(
+  List<({int x, int width, Uint8List rgba})> tiles,
+  int sheetWidth,
+  int bandHeight,
+  bool last,
+) {
+  final rowBytes = sheetWidth * 3 + 1;
+  final band = Uint8List(rowBytes * bandHeight);
+  for (final tile in tiles) {
+    for (var row = 0; row < bandHeight; row++) {
+      var target = row * rowBytes + 1 + tile.x * 3;
+      var source = row * tile.width * 4;
+      for (var column = 0; column < tile.width; column++) {
+        band[target++] = tile.rgba[source];
+        band[target++] = tile.rgba[source + 1];
+        band[target++] = tile.rgba[source + 2];
+        source += 4;
+      }
+    }
+  }
+  final filter = RawZLibFilter.deflateFilter(level: 6, raw: true);
+  filter.process(band, 0, band.length);
+  final deflated = BytesBuilder(copy: false);
+  for (
+    var chunk = filter.processed(flush: !last, end: last);
+    chunk != null;
+    chunk = filter.processed(flush: !last, end: last)
+  ) {
+    deflated.add(chunk);
+  }
+  return (
+    idat: _pngChunk('IDAT', deflated.takeBytes()),
+    adler: _adler32(band),
+    length: band.length,
   );
-  final pending = BytesBuilder(copy: false);
-  final deflate = ZLibEncoder(level: 6).startChunkedConversion(
-    _ChunkSink((data) {
-      pending.add(data);
-      if (pending.length >= 256 * 1024) chunk('IDAT', pending.takeBytes());
-    }),
-  );
-  final rowBytes = sheet.width * 3 + 1;
+}
+
+/// Encodes the whole sheet as one RGB PNG without holding the full raster.
+/// Each band of tiles is rendered, then converted and compressed into an
+/// IDAT chunk off the UI isolate, and released before the next band.
+Future<Uint8List> encodeSheetPng(CadSheetRaster sheet) async {
+  await sheet.prepare();
+  final output = BytesBuilder(copy: false)
+    ..add(const [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    ..add(
+      _pngChunk(
+        'IHDR',
+        (ByteData(13)
+              ..setUint32(0, sheet.width)
+              ..setUint32(4, sheet.height)
+              ..setUint8(8, 8) // bit depth
+              ..setUint8(9, 2) // RGB
+              ..setUint8(10, 0)
+              ..setUint8(11, 0)
+              ..setUint8(12, 0))
+            .buffer
+            .asUint8List(),
+      ),
+    )
+    // zlib header: deflate with a 32 KiB window, default compression.
+    ..add(_pngChunk('IDAT', const [0x78, 0x9c]));
+  var adler = 1;
   for (var y = 0; y < sheet.height; y += sheetTileSize) {
     final bandHeight = math.min(sheetTileSize, sheet.height - y);
-    final band = Uint8List(rowBytes * bandHeight);
+    final tiles = <({int x, int width, Uint8List rgba})>[];
     for (var x = 0; x < sheet.width; x += sheetTileSize) {
       final tileWidth = math.min(sheetTileSize, sheet.width - x);
       final image = await sheet.renderTile(x, y, tileWidth, bandHeight);
-      final rgba = await _rawRgba(image);
-      image.dispose();
-      for (var row = 0; row < bandHeight; row++) {
-        var target = row * rowBytes + 1 + x * 3;
-        var source = row * tileWidth * 4;
-        for (var column = 0; column < tileWidth; column++) {
-          band[target++] = rgba[source];
-          band[target++] = rgba[source + 1];
-          band[target++] = rgba[source + 2];
-          source += 4;
-        }
+      try {
+        tiles.add((x: x, width: tileWidth, rgba: await _rawRgba(image)));
+      } finally {
+        image.dispose();
       }
     }
-    deflate.add(band); // Each row starts with filter type 0 (None).
+    final width = sheet.width;
+    final last = y + bandHeight >= sheet.height;
+    final band = await Isolate.run(
+      () => _encodePngBand(tiles, width, bandHeight, last),
+    );
+    output.add(band.idat);
+    adler = _adler32Combine(adler, band.adler, band.length);
   }
-  deflate.close();
-  if (pending.length > 0) chunk('IDAT', pending.takeBytes());
-  chunk('IEND', const []);
+  output
+    ..add(
+      _pngChunk(
+        'IDAT',
+        (ByteData(4)..setUint32(0, adler)).buffer.asUint8List(),
+      ),
+    )
+    ..add(_pngChunk('IEND', const []));
   return output.takeBytes();
 }
 
@@ -290,16 +362,20 @@ class PdfImageTile {
     required double height,
   }) async {
     final rgba = await _rawRgba(image);
-    final rgb = Uint8List(image.width * image.height * 3);
-    for (var source = 0, target = 0; source < rgba.length; source += 4) {
-      rgb[target++] = rgba[source];
-      rgb[target++] = rgba[source + 1];
-      rgb[target++] = rgba[source + 2];
-    }
+    // Conversion and compression run off the UI isolate.
+    final deflated = await Isolate.run(() {
+      final rgb = Uint8List(rgba.length ~/ 4 * 3);
+      for (var source = 0, target = 0; source < rgba.length; source += 4) {
+        rgb[target++] = rgba[source];
+        rgb[target++] = rgba[source + 1];
+        rgb[target++] = rgba[source + 2];
+      }
+      return Uint8List.fromList(ZLibCodec(level: 6).encode(rgb));
+    });
     return PdfImageTile(
       pixelWidth: image.width,
       pixelHeight: image.height,
-      deflatedRgb: Uint8List.fromList(ZLibCodec(level: 6).encode(rgb)),
+      deflatedRgb: deflated,
       x: x,
       y: y,
       width: width,
@@ -350,6 +426,7 @@ class PdfRasterPage {
     required double widthPoints,
     required double heightPoints,
   }) async {
+    await sheet.prepare();
     final xScale = widthPoints / sheet.width;
     final yScale = heightPoints / sheet.height;
     final tiles = <PdfImageTile>[];

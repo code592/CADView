@@ -1,3 +1,4 @@
+use cad_core::TextGeometry2D;
 use cad_core::{
     fingerprint, CadError, CancellationToken, DiagnosticSeverity, DocumentMetadata, Entity2D,
     Entity2DGeometry, FormatAdapter, FormatCapabilities, FormatDiagnostic, FormatId, Layer,
@@ -121,7 +122,7 @@ impl FormatAdapter for SvgAdapter {
                     points: parse_points(node.attribute("points").unwrap_or_default()),
                     closed: node.tag_name().name() == "polygon",
                 }),
-                "text" => Some(Entity2DGeometry::Text {
+                "text" => Some(Entity2DGeometry::Text(Box::new(TextGeometry2D {
                     // SVG has a downward Y axis. Scene2D uses an upward Y axis;
                     // convert the insertion point, not the upright glyph shape.
                     origin: Point2::new(number(&node, "x"), -number(&node, "y")),
@@ -150,7 +151,7 @@ impl FormatAdapter for SvgAdapter {
                     text_runs: Vec::new(),
                     text_warnings: Vec::new(),
                     plane: None,
-                }),
+                }))),
                 "path" => {
                     unsupported_paths += 1;
                     None
@@ -349,14 +350,14 @@ mod tests {
         let SceneDocument::TwoD(scene) = opened.scene else {
             panic!("expected a 2D scene");
         };
-        let Entity2DGeometry::Text {
+        let Entity2DGeometry::Text(text_geometry) = &scene.entities[0].geometry else {
+            panic!("expected text");
+        };
+        let TextGeometry2D {
             value,
             height_reference,
             ..
-        } = &scene.entities[0].geometry
-        else {
-            panic!("expected text");
-        };
+        } = &**text_geometry;
         assert_eq!(value, "中文CAD");
         assert_eq!(*height_reference, cad_core::TextHeightReference2D::Em);
     }

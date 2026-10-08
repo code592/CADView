@@ -47,6 +47,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RayHitResult dco_decode_box_autoadd_ray_hit_result(dynamic raw);
+
+  @protected
   SnapResult dco_decode_box_autoadd_snap_result(dynamic raw);
 
   @protected
@@ -114,10 +117,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RayHitResult? dco_decode_opt_box_autoadd_ray_hit_result(dynamic raw);
+
+  @protected
   SnapResult? dco_decode_opt_box_autoadd_snap_result(dynamic raw);
 
   @protected
   BigInt? dco_decode_opt_box_autoadd_u_64(dynamic raw);
+
+  @protected
+  RayHitResult dco_decode_ray_hit_result(dynamic raw);
 
   @protected
   SnapResult dco_decode_snap_result(dynamic raw);
@@ -162,6 +171,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   OpenDocumentResponse sse_decode_box_autoadd_open_document_response(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RayHitResult sse_decode_box_autoadd_ray_hit_result(
     SseDeserializer deserializer,
   );
 
@@ -245,12 +259,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RayHitResult? sse_decode_opt_box_autoadd_ray_hit_result(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   SnapResult? sse_decode_opt_box_autoadd_snap_result(
     SseDeserializer deserializer,
   );
 
   @protected
   BigInt? sse_decode_opt_box_autoadd_u_64(SseDeserializer deserializer);
+
+  @protected
+  RayHitResult sse_decode_ray_hit_result(SseDeserializer deserializer);
 
   @protected
   SnapResult sse_decode_snap_result(SseDeserializer deserializer);
@@ -306,6 +328,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_open_document_response(
     OpenDocumentResponse self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_ray_hit_result(
+    RayHitResult self,
     SseSerializer serializer,
   );
 
@@ -406,6 +434,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_ray_hit_result(
+    RayHitResult? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_snap_result(
     SnapResult? self,
     SseSerializer serializer,
@@ -413,6 +447,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_opt_box_autoadd_u_64(BigInt? self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ray_hit_result(RayHitResult self, SseSerializer serializer);
 
   @protected
   void sse_encode_snap_result(SnapResult self, SseSerializer serializer);

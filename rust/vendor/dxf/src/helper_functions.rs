@@ -234,8 +234,8 @@ pub(crate) fn bool_from_clipping(c: XrefClippingBoundaryVisibility) -> bool {
     c != XrefClippingBoundaryVisibility::NotDisplayedNotPlotted
 }
 
-pub(crate) fn parse_f64(s: String, offset: usize) -> DxfResult<f64> {
-    match s.trim().parse::<f64>() {
+pub(crate) fn parse_f64(s: impl AsRef<str>, offset: usize) -> DxfResult<f64> {
+    match s.as_ref().trim().parse::<f64>() {
         Ok(d) => Ok(d),
         Err(e) => Err(DxfError::ParseFloatError(e, offset)),
     }
@@ -247,8 +247,8 @@ fn parse_f64_test() {
     assert_eq!(2.5, parse_f64("  2.5 ".to_string(), 0).unwrap());
 }
 
-pub(crate) fn parse_i32(s: String, offset: usize) -> DxfResult<i32> {
-    match s.trim().parse::<i32>() {
+pub(crate) fn parse_i32(s: impl AsRef<str>, offset: usize) -> DxfResult<i32> {
+    match s.as_ref().trim().parse::<i32>() {
         Ok(i) => Ok(i),
         Err(e) => Err(DxfError::ParseIntError(e, offset)),
     }
@@ -259,8 +259,8 @@ fn parse_i32_test() {
     assert_eq!(2, parse_i32("  2 ".to_string(), 0).unwrap());
 }
 
-pub(crate) fn parse_i64(s: String, offset: usize) -> DxfResult<i64> {
-    match s.trim().parse::<i64>() {
+pub(crate) fn parse_i64(s: impl AsRef<str>, offset: usize) -> DxfResult<i64> {
+    match s.as_ref().trim().parse::<i64>() {
         Ok(l) => Ok(l),
         Err(e) => Err(DxfError::ParseIntError(e, offset)),
     }
@@ -271,8 +271,8 @@ fn parse_i64_test() {
     assert_eq!(2, parse_i64("  2 ".to_string(), 0).unwrap());
 }
 
-pub(crate) fn parse_i16(s: String, offset: usize) -> DxfResult<i16> {
-    match s.trim().parse::<f64>() {
+pub(crate) fn parse_i16(s: impl AsRef<str>, offset: usize) -> DxfResult<i16> {
+    match s.as_ref().trim().parse::<f64>() {
         Ok(s) => Ok(s as i16),
         Err(e) => Err(DxfError::ParseFloatError(e, offset)),
     }

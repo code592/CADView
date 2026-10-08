@@ -27,7 +27,63 @@ fixed baselines:
 
 These are release gates, not assertions about the current preview renderer.
 
+See [PERFORMANCE.md](PERFORMANCE.md) for the reproducible public/downloaded
+large-file corpus, current measurements, correctness checks and remaining
+mobile performance gates. The opt-in benchmarks are excluded from ordinary
+unit runs unless an explicit corpus path is supplied.
+
+`cad_scene_packet_test.dart` independently constructs binary fixtures and
+checks exact f64 coordinates, styles, rich text/masks, range views, rejected
+malformed packets and packed-vs-JSON raster equality. The native packet parity
+test compares full/cropped/hidden-layer packets with legacy geometry and
+metadata without a floating-point tolerance. `serde_json/float_roundtrip`
+keeps the compatibility decoder from introducing a one-ULP difference.
+`cad_mesh_render_accuracy_test.dart` compares every edge/highlight with an
+independent triangle renderer and checks that reused mesh recordings remain
+valid after their cache entry is replaced.
+Sparse, unsorted, duplicate and greater-than-2^53 IDs have exact lookup and
+selection coverage, including a million-record sparse packet and sliced
+ranges. Duplicate occurrences are highlighted in source order.
+`mesh_culling_fixture.dart` adds 24 pixel comparisons with an independent
+uncropped drawLine oracle: offscreen endpoints crossing the viewport, widest
+measured-face strokes on borders, 1e12 coordinates, identical-projection
+viewport resizing and prior snapshots after cache replacement/disposal.
+It also verifies the independent unculled batching reference used by the
+opt-in zoom/pan benchmark. The same fixture runs on Android and iOS.
+The fixture now contains 1,537 triangles, two entire hidden source chunks
+and a visible measured face afterward; source face indices and highlight
+order must survive coarse rejection. `cad_mesh_render_index_test.dart`
+checks exact chunk bounds, unused vertices, range/finite validation, a
+300-view independent float32 rejection oracle, and overflow fail-open.
+The sparse-projection fixture now has 4,609 triangles/eight whole hidden
+chunks and 56 pixel comparisons. It covers sparse-to-full-to-sparse views,
+entirely offscreen views and return, compensated resizing, unchanged face
+indices, retained snapshots, cache release and more than 255 camera changes
+to cross byte-epoch wrap. Diagnostics assert the sparse path really runs;
+initially offscreen meshes must not allocate vertex projection buffers.
+
+`cad_mesh_packet_test.dart` checks independent CAD3D001 fixtures, exact f64
+large coordinates/signed zero, native f32 normal bits, u32 topology,
+unaligned slices, immutable buffers, optional mesh properties and actual
+triangle measurements. The native compact-open regression checks full
+scene equality with legacy JSON and assembly visibility without reloading
+buffers. The 4,200-triangle raster oracle now runs both packed and legacy
+paths, including highlights across batch boundaries and cache replacement.
+
 ## Offline multilingual text
+
+Interaction regressions exercise phone (390×844) and tablet (1024×768)
+layouts, pen input, 3× touch fine adjustment, delayed native replies, ordered
+taps, long-press release followed immediately by a tap, coalesced preview
+movement, cancellation, clear and switching tools. `cad_pick_queue_test.dart`
+also covers failed queries and cancellation while a new preview is pending.
+Snapshot tests reject zoom reuse and pans beyond the captured image margin.
+The native suite compares indexed intersections against exhaustive mixed
+line/arc pairs, checks a transverse boundary behind 600 closer parallel hatch
+lines at ordinary and 1e12 coordinates, and checks exact snapping on a
+100,000-vertex polyline. Invalid nonfinite pick inputs return errors.
+Mobile accuracy tests use the real Rust bridge to open the dense-line DXF,
+pick its crossing through the long-press viewer UI and clear the measurement.
 
 `flutter test test/cad_fonts_test.dart` checks the actual Unicode cmap of every
 bundled font against all translated UI characters and CAD samples (CJK, Latin,
@@ -554,6 +610,5 @@ its start and draws solid lines when a period is under 3 pixels on screen. In
 the A1/A2/A3 sample the centre lines (`ACAD_ISO04W100`, 12/1.5/0.25/1.5) and
 dashed lines (2.5/1.25) now show as in the AutoCAD plot. Not yet handled:
 block-insert scale on patterns, per-vertex polyline restarts (PLINEGEN off),
-and shapes/text inside complex linetypes. Scene cache 31 / `cadview-17`
+and shapes/text inside complex linetypes. Scene cache 32 / `cadview-17`
 invalidate older cached scenes.
-

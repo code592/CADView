@@ -10,6 +10,9 @@ import '../../core/cad_engine.dart';
 import '../../core/cad_fonts.dart';
 import '../../core/cad_font_metrics.dart';
 import 'cad_document_model.dart';
+import 'cad_scene_packet.dart';
+import 'cad_mesh_packet.dart';
+import 'cad_mesh_render_index.dart';
 import 'cad_entity_metrics.dart';
 
 const _cadFontFallback = <String>[
@@ -56,13 +59,12 @@ Color cadCanvasColor(int argb) {
 }
 
 class _CadWorldPathBatch {
-  const _CadWorldPathBatch({
+  _CadWorldPathBatch({
     required this.colorArgb,
     required this.strokeWidth,
     required this.filled,
     required this.path,
-    this.dashedPath,
-    this.dashPeriod = 0,
+    this.pattern = const [],
   });
 
   final int colorArgb;
@@ -72,9 +74,30 @@ class _CadWorldPathBatch {
   /// Continuous geometry; also drawn for linetypes too dense to resolve.
   final Path path;
 
-  /// The same geometry broken into linetype dashes (world units).
-  final Path? dashedPath;
-  final double dashPeriod;
+  /// Bounds of [path] (and of its dashes), in the set's local coordinates.
+  late final Rect bounds = path.getBounds();
+
+  /// Linetype pattern of every entity in [path] (world units), or empty.
+  final List<double> pattern;
+
+  late final double dashPeriod = pattern.fold<double>(
+    0,
+    (sum, value) => sum + value.abs(),
+  );
+
+  Path? _dashedPath;
+
+  /// [path] broken into [pattern]'s dashes, built when first drawn dashed
+  /// (zoomed in enough to see them, and only for visible cells). Each
+  /// entity is one contour, and dashes restart at every contour.
+  Path? get dashedPath =>
+      pattern.isEmpty ? null : _dashedPath ??= cadDashPath(path, pattern);
+
+  /// Releases the native paths without building missing dashes.
+  void reset() {
+    path.reset();
+    _dashedPath?.reset();
+  }
 }
 
 /// Linetype periods below this many screen pixels draw continuous, as CAD
@@ -116,17 +139,106 @@ Path cadDashPath(Path source, List<double> pattern) {
   return output;
 }
 
+/// Text whose measured bounds are thinner than this many pixels on screen is
+/// drawn as a stroke along the label instead of shaped glyphs ("greeking"),
+/// as CAD viewers do: glyphs are not legible at that size (a cap height of
+/// about 1.5 px), and shaping thousands of them made overview frames slow.
+const _cadGreekTextPixels = 2.0;
+
+/// Large documents split each style's path into a grid of this many cells
+/// per side, so frames skip the cells that are off screen. Smaller ones keep
+/// one path per style.
+const _cadChunkGrid = 8;
+const _cadChunkMinimumEntities = 20000;
+
+/// Entities processed between checks of the path-building time slice.
+const _cadPathSliceEntities = 64;
+
+bool _cadNeverDue() => false;
+
+/// Greeked labels of one paint part, batched per color.
+class _CadGreekText {
+  final _lines = <Color, Path>{};
+  final _blocks = <Color, Path>{};
+
+  /// A single-line label becomes a stroke through its bounds along its
+  /// rotation; a paragraph becomes a faint block over its bounds.
+  void add(
+    Rect box,
+    double rotation, {
+    required bool multiline,
+    required Color color,
+  }) {
+    if (multiline) {
+      _blocks.putIfAbsent(color, Path.new).addRect(box);
+      return;
+    }
+    final dx = math.cos(rotation), dy = -math.sin(rotation);
+    final reach = math.min(
+      dx.abs() < 1e-9 ? double.infinity : box.width / 2 / dx.abs(),
+      dy.abs() < 1e-9 ? double.infinity : box.height / 2 / dy.abs(),
+    );
+    final half = Offset(dx, dy) * (reach.isFinite ? reach : 0);
+    _lines.putIfAbsent(color, Path.new)
+      ..moveTo(box.center.dx - half.dx, box.center.dy - half.dy)
+      ..lineTo(box.center.dx + half.dx, box.center.dy + half.dy);
+  }
+
+  void paint(Canvas canvas) {
+    for (final MapEntry(key: color, value: path) in _blocks.entries) {
+      canvas.drawPath(path, Paint()..color = color.withValues(alpha: 0.3));
+    }
+    for (final MapEntry(key: color, value: path) in _lines.entries) {
+      canvas.drawPath(
+        path,
+        Paint()
+          ..color = color.withValues(alpha: 0.6)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
+  }
+}
+
 class _CadWorldPathSet {
-  const _CadWorldPathSet({required this.origin, required this.batches});
+  const _CadWorldPathSet({
+    required this.origin,
+    required this.batches,
+    required this.foreground,
+  });
 
   final Offset origin;
   final List<_CadWorldPathBatch> batches;
+
+  /// Indices of the entities painted per frame (text, points and packed
+  /// fallback records), collected while the paths are built.
+  final List<int> foreground;
 }
 
 class _CadPaintPart {
-  const _CadPaintPart(this.paths, this.entities);
+  _CadPaintPart(this.paths, this.entities);
   final _CadWorldPathSet paths;
   final List<Map<String, dynamic>> entities;
+  List<int> get _foreground => paths.foreground;
+  Set<int> _selected = {};
+  List<int>? _active;
+
+  Iterable<Map<String, dynamic>> foreground(Set<int> selected) {
+    if (_active == null || !setEquals(selected, _selected)) {
+      _selected = {...selected};
+      _active = selected.isEmpty
+          ? _foreground
+          : ({
+              ..._foreground,
+              if (entities is CadPackedEntities)
+                ...(entities as CadPackedEntities).indicesOfIds(selected)
+              else
+                for (var i = 0; i < entities.length; i++)
+                  if (selected.contains(entities[i]['id'])) i,
+            }.toList()..sort());
+    }
+    return _active!.map((index) => entities[index]);
+  }
 }
 
 class CadViewTransform {
@@ -732,13 +844,232 @@ double? _compensatedFiniteDot3(CadPoint3 first, CadPoint3 second) {
   return _compensatedFiniteSum3(x, y, z);
 }
 
-List<CadPoint3> _meshPositions(Map<String, dynamic> mesh) =>
-    _meshPositionCache[mesh] ??= (mesh['positions'] as List<dynamic>)
-        .map(CadPoint3.fromJson)
-        .toList(growable: false);
+class _PackedMeshPoints extends ListBase<CadPoint3> {
+  _PackedMeshPoints(this.coordinates);
+  final Float64List coordinates;
+  @override
+  int get length => coordinates.length ~/ 3;
+  @override
+  set length(int value) => throw UnsupportedError('Read-only CAD mesh');
+  @override
+  CadPoint3 operator [](int i) {
+    RangeError.checkValidIndex(i, this);
+    return CadPoint3(
+      coordinates[i * 3],
+      coordinates[i * 3 + 1],
+      coordinates[i * 3 + 2],
+    );
+  }
 
-List<int> _meshIndices(Map<String, dynamic> mesh) => _meshIndexCache[mesh] ??=
-    (mesh['indices'] as List<dynamic>).cast<int>().toList(growable: false);
+  @override
+  void operator []=(int i, CadPoint3 value) =>
+      throw UnsupportedError('Read-only CAD mesh');
+}
+
+List<CadPoint3> _meshPositions(Map<String, dynamic> mesh) =>
+    _meshPositionCache[mesh] ??= mesh is CadPackedMesh
+    ? _PackedMeshPoints(mesh.coordinates)
+    : (mesh['positions'] as List<dynamic>)
+          .map(CadPoint3.fromJson)
+          .toList(growable: false);
+
+List<int> _meshIndices(Map<String, dynamic> mesh) =>
+    _meshIndexCache[mesh] ??= mesh is CadPackedMesh
+    ? mesh.indices
+    : (mesh['indices'] as List<dynamic>).cast<int>().toList(growable: false);
+
+final _meshProjectionCache = Expando<_CadMeshProjection>();
+final _meshRecordingCache = Expando<_CadMeshRecording>();
+
+bool _same3DView(Cad3DViewTransform a, Cad3DViewTransform b) =>
+    a.center.x == b.center.x &&
+    a.center.y == b.center.y &&
+    a.center.z == b.center.z &&
+    a.right.x == b.right.x &&
+    a.right.y == b.right.y &&
+    a.right.z == b.right.z &&
+    a.up.x == b.up.x &&
+    a.up.y == b.up.y &&
+    a.up.z == b.up.z &&
+    a.screenCenter == b.screenCenter &&
+    a.scale == b.scale;
+
+class _CadMeshRecording {
+  _CadMeshRecording(
+    this.transform,
+    this.size,
+    this.selected,
+    this.faces,
+    this.picture,
+  );
+  final Cad3DViewTransform transform;
+  final Size size;
+  final bool selected;
+  final Map<int, int> faces;
+  final ui.Picture picture;
+  bool matches(
+    Cad3DViewTransform view,
+    Size viewportSize,
+    bool isSelected,
+    Map<int, int> measured,
+  ) =>
+      size == viewportSize &&
+      selected == isSelected &&
+      mapEquals(faces, measured) &&
+      _same3DView(transform, view);
+}
+
+class _CadMeshProjection {
+  _CadMeshProjection(this.points, this.transform);
+  final Float32List points;
+  Cad3DViewTransform transform;
+  Uint8List? clipCodes;
+  Size? clipSize;
+  bool hasOutsideVertices = false;
+  bool complete = false;
+  Uint8List? vertexEpochs;
+  int epoch = 0;
+  Size? sparseSize;
+
+  bool matches(Cad3DViewTransform other) => _same3DView(transform, other);
+}
+
+Float32List _projectMesh(
+  Map<String, dynamic> mesh,
+  List<CadPoint3> positions,
+  Cad3DViewTransform transform,
+) {
+  var cached = _meshProjectionCache[mesh];
+  if (cached != null && cached.complete && cached.matches(transform)) {
+    return cached.points;
+  }
+  cached ??= _CadMeshProjection(Float32List(positions.length * 2), transform);
+  // Subtract the f64 camera origin before converting to screen float32, just
+  // like Canvas.drawLine. Large source coordinates must not lose local detail.
+  final packed = mesh is CadPackedMesh ? mesh.coordinates : null;
+  for (var index = 0; index < positions.length; index++) {
+    final point = packed == null ? positions[index] : null;
+    final x =
+        (packed == null ? point!.x : packed[index * 3]) - transform.center.x;
+    final y =
+        (packed == null ? point!.y : packed[index * 3 + 1]) -
+        transform.center.y;
+    final z =
+        (packed == null ? point!.z : packed[index * 3 + 2]) -
+        transform.center.z;
+    cached.points[index * 2] =
+        transform.screenCenter.dx +
+        (x * transform.right.x +
+                y * transform.right.y +
+                z * transform.right.z) *
+            transform.scale;
+    cached.points[index * 2 + 1] =
+        transform.screenCenter.dy -
+        (x * transform.up.x + y * transform.up.y + z * transform.up.z) *
+            transform.scale;
+  }
+  cached.transform = transform;
+  cached.complete = true;
+  cached.sparseSize = null;
+  cached.clipSize = null;
+  _meshProjectionCache[mesh] = cached;
+  return cached.points;
+}
+
+_CadMeshProjection _prepareSparseMesh(
+  CadPackedMesh mesh,
+  Cad3DViewTransform transform,
+  Size size,
+) {
+  final cached = _meshProjectionCache[mesh] ??= _CadMeshProjection(
+    Float32List(mesh.coordinates.length ~/ 3 * 2),
+    transform,
+  );
+  if (!cached.matches(transform)) {
+    cached.transform = transform;
+    cached.complete = false;
+    cached.sparseSize = null;
+  }
+  cached.clipCodes ??= Uint8List(mesh.coordinates.length ~/ 3);
+  cached.vertexEpochs ??= Uint8List(mesh.coordinates.length ~/ 3);
+  if (cached.sparseSize != size) {
+    cached.epoch++;
+    if (cached.epoch > 255) {
+      cached.vertexEpochs!.fillRange(0, cached.vertexEpochs!.length, 0);
+      cached.epoch = 1;
+    }
+    cached.sparseSize = size;
+  }
+  // Sparse codes cover only touched vertices and must never be mistaken for
+  // the complete code buffer when switching back to overview rendering.
+  cached.clipSize = null;
+  return cached;
+}
+
+void _projectSparseVertex(
+  _CadMeshProjection cached,
+  Float64List xyz,
+  int vertex,
+  Cad3DViewTransform view,
+  Size size,
+) {
+  if (cached.vertexEpochs![vertex] == cached.epoch) return;
+  final at = vertex * 2;
+  if (!cached.complete) {
+    final x = xyz[vertex * 3] - view.center.x;
+    final y = xyz[vertex * 3 + 1] - view.center.y;
+    final z = xyz[vertex * 3 + 2] - view.center.z;
+    cached.points[at] =
+        view.screenCenter.dx +
+        (x * view.right.x + y * view.right.y + z * view.right.z) * view.scale;
+    cached.points[at + 1] =
+        view.screenCenter.dy -
+        (x * view.up.x + y * view.up.y + z * view.up.z) * view.scale;
+  }
+  final x = cached.points[at], y = cached.points[at + 1];
+  var code = 0;
+  if (x.isFinite && y.isFinite) {
+    if (x < -4) code |= 1;
+    if (x > size.width + 4) code |= 2;
+    if (y < -4) code |= 4;
+    if (y > size.height + 4) code |= 8;
+  }
+  cached.clipCodes![vertex] = code;
+  cached.vertexEpochs![vertex] = cached.epoch;
+}
+
+Uint8List? _meshClipCodes(
+  Map<String, dynamic> mesh,
+  Float32List points,
+  Size size,
+) {
+  final projection = _meshProjectionCache[mesh]!;
+  if (projection.clipSize == size) {
+    return projection.hasOutsideVertices ? projection.clipCodes : null;
+  }
+  // Conservative screen-space rejection only. Four logical pixels cover
+  // the widest mesh stroke (3 px), round caps and antialias fringe. A
+  // triangle is skipped only when ALL vertices lie beyond the SAME side.
+  // Crossings whose endpoints are off screen must remain in source order.
+  final codes = projection.clipCodes ?? Uint8List(points.length ~/ 2);
+  var outside = false;
+  for (var i = 0; i < codes.length; i++) {
+    final x = points[i * 2], y = points[i * 2 + 1];
+    var code = 0;
+    if (x.isFinite && y.isFinite) {
+      if (x < -4) code |= 1;
+      if (x > size.width + 4) code |= 2;
+      if (y < -4) code |= 4;
+      if (y > size.height + 4) code |= 8;
+    }
+    codes[i] = code;
+    outside = outside || code != 0;
+  }
+  projection.clipSize = size;
+  projection.clipCodes = codes;
+  projection.hasOutsideVertices = outside;
+  return outside ? codes : null;
+}
 
 class CadRay3 {
   const CadRay3(this.origin, this.direction);
@@ -952,12 +1283,21 @@ class CadScenePainter extends CustomPainter {
     this.coordinateXAxis2D,
     this.coordinateOrigin3D,
     this.showGrid = true,
+    this.paintBackground = true,
+    this.cullMargin = 40,
   });
 
   final CadDocumentModel document;
 
   /// The faint screen grid; sheet exports leave it out like a plot.
   final bool showGrid;
+
+  /// Whether the canvas color is filled first; snapshots stay transparent.
+  final bool paintBackground;
+
+  /// How far beyond the canvas, in logical pixels, labels and points are
+  /// still painted (a snapshot reaches past the screen edges).
+  final double cullMargin;
   final double zoom;
   final Offset pan;
   final List<CadTextAnnotation> annotations;
@@ -990,6 +1330,18 @@ class CadScenePainter extends CustomPainter {
   final CadPoint3? coordinateOrigin3D;
 
   static final Expando<Rect> _polylineBounds = Expando<Rect>();
+
+  /// Overrides the grid of path cells (1 disables cells) in tests.
+  @visibleForTesting
+  static int? debugChunkGrid;
+
+  /// Draws off-screen cells too, in tests.
+  @visibleForTesting
+  static bool debugDrawAllCells = false;
+
+  /// World bounds of each text geometry. They depend only on the geometry
+  /// and the calibrated fonts, so visibility needs no layout per frame.
+  static final Expando<Rect> _textWorldBounds = Expando<Rect>();
   static final Expando<List<_CadPaintPart>> _worldPathCache =
       Expando<List<_CadPaintPart>>();
   static final LinkedHashMap<
@@ -1012,24 +1364,115 @@ class CadScenePainter extends CustomPainter {
   _textLayouts = LinkedHashMap();
   static int _cachedTextParagraphs = 0;
 
-  @override
-  void paint(Canvas canvas, Size size) {
+  /// Release large native paths/display lists at lifecycle boundaries rather
+  /// than waiting for Dart to collect their small wrapper objects. Previously
+  /// recorded frames retain immutable native snapshots and remain valid.
+  static void releaseDocument(CadDocumentModel document) {
+    final parts = _worldPathCache[document];
+    _worldPathCache[document] = null;
+    if (parts != null) {
+      for (final part in parts) {
+        for (final batch in part.paths.batches) {
+          batch.reset();
+        }
+      }
+    }
+    if (document.sceneKind == 'three_d') {
+      for (final mesh in document.meshes) {
+        _meshRecordingCache[mesh]?.picture.dispose();
+        _meshRecordingCache[mesh] = null;
+        _meshProjectionCache[mesh] = null;
+        _meshPositionCache[mesh] = null;
+        _meshIndexCache[mesh] = null;
+      }
+    }
+  }
+
+  /// Local opt-in diagnostics only; not a process/peak-memory measurement.
+  /// No telemetry or frame polling. Counting stamps is deliberately excluded
+  /// from render timings and normal viewer operation.
+  @visibleForTesting
+  static Map<String, int> meshRenderCacheStats(CadDocumentModel document) {
+    var pictureBytes = 0,
+        projectionBytes = 0,
+        clipBytes = 0,
+        epochBytes = 0,
+        validVertices = 0;
+    for (final mesh in document.meshes) {
+      pictureBytes +=
+          _meshRecordingCache[mesh]?.picture.approximateBytesUsed ?? 0;
+      final projection = _meshProjectionCache[mesh];
+      if (projection == null) continue;
+      projectionBytes += projection.points.lengthInBytes;
+      clipBytes += projection.clipCodes?.lengthInBytes ?? 0;
+      epochBytes += projection.vertexEpochs?.lengthInBytes ?? 0;
+      validVertices += projection.complete
+          ? projection.points.length ~/ 2
+          : projection.vertexEpochs
+                    ?.where((stamp) => stamp == projection.epoch)
+                    .length ??
+                0;
+    }
+    return {
+      'recording_approx_bytes': pictureBytes,
+      'projection_bytes': projectionBytes,
+      'clip_code_bytes': clipBytes,
+      'vertex_epoch_bytes': epochBytes,
+      'valid_projection_vertices': validVertices,
+    };
+  }
+
+  /// This scene without backdrop, painting labels and points up to
+  /// [margin] logical pixels beyond the canvas: the content of a snapshot.
+  CadScenePainter snapshotContent(double margin) => CadScenePainter(
+    document: document,
+    zoom: zoom,
+    pan: pan,
+    annotations: annotations,
+    selectedEntityId: selectedEntityId,
+    selectedEntityIds: selectedEntityIds,
+    subtractedEntityIds: subtractedEntityIds,
+    measurementPoints: measurementPoints,
+    measurementIntersectionPoints: measurementIntersectionPoints,
+    indexedMeasurementPoints: indexedMeasurementPoints,
+    measurementCentroid: measurementCentroid,
+    measurementClosed: measurementClosed,
+    measurementRectangle: measurementRectangle,
+    measurementOrientedRectangle: measurementOrientedRectangle,
+    measurementCircle3Point: measurementCircle3Point,
+    measurementArc3Point: measurementArc3Point,
+    measurementPointLineOffset: measurementPointLineOffset,
+    measurementLineIntersection: measurementLineIntersection,
+    measurementParallelLineSpacing: measurementParallelLineSpacing,
+    measurementSegmentClearance: measurementSegmentClearance,
+    measurementMidpoint: measurementMidpoint,
+    measurementAngle: measurementAngle,
+    yaw: yaw,
+    pitch: pitch,
+    selectedMeshId: selectedMeshId,
+    measurement3DPoints: measurement3DPoints,
+    measurement3DFaces: measurement3DFaces,
+    measurement3DAngle: measurement3DAngle,
+    coordinateOrigin2D: coordinateOrigin2D,
+    coordinateXAxis2D: coordinateXAxis2D,
+    coordinateOrigin3D: coordinateOrigin3D,
+    showGrid: showGrid,
+    paintBackground: false,
+    cullMargin: margin,
+  );
+
+  /// The canvas color and, with [grid], the screen grid for [pan].
+  static void paintBackdrop(
+    Canvas canvas,
+    Size size,
+    Offset pan, {
+    bool grid = true,
+  }) {
     canvas.drawRect(
       Offset.zero & size,
       Paint()..color = const Color(0xff071017),
     );
-    if (showGrid) _paintGrid(canvas, size);
-    switch (document.sceneKind) {
-      case 'two_d':
-        _paint2D(canvas, size);
-      case 'three_d':
-        _paint3D(canvas, size);
-      case 'paged':
-        _paintPaged(canvas, size);
-    }
-  }
-
-  void _paintGrid(Canvas canvas, Size size) {
+    if (!grid) return;
     final paint = Paint()
       ..color = Colors.white.withValues(alpha: 0.035)
       ..strokeWidth = 1;
@@ -1044,15 +1487,32 @@ class CadScenePainter extends CustomPainter {
     }
   }
 
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (paintBackground) paintBackdrop(canvas, size, pan, grid: showGrid);
+    switch (document.sceneKind) {
+      case 'two_d':
+        _paint2D(canvas, size);
+      case 'three_d':
+        _paint3D(canvas, size);
+      case 'paged':
+        _paintPaged(canvas, size);
+    }
+  }
+
   void _paint2D(Canvas canvas, Size size) {
     final transform = CadViewTransform.forScene(document, size, zoom, pan);
     final visibleLayers = {
       for (final layer in document.layers) layer.id.toInt(): layer.visible,
     };
-    final parts = _worldPathCache[document] ??= _buildPaintParts(
+    final parts = _worldPathCache[document] ??= _paintPartSteps(
       document,
       visibleLayers,
-    );
+    ).last!;
+    final selectedIds = {
+      if (selectedEntityId != null) selectedEntityId!.toInt(),
+      for (final id in selectedEntityIds) id.toInt(),
+    };
     for (final part in parts) {
       final pathSet = part.paths;
       canvas.save();
@@ -1060,12 +1520,28 @@ class CadScenePainter extends CustomPainter {
       canvas.translate(pathOrigin.dx, pathOrigin.dy);
       canvas.scale(transform.scale, -transform.scale);
       final inverseScale = 1 / transform.scale;
+      // Path-local area this canvas can show: the viewport (with the cull
+      // margin) within the current clip, e.g. one tile of a sheet export.
+      var visible = Rect.fromPoints(
+        transform.screenToWorld(Offset(-cullMargin, -cullMargin)),
+        transform.screenToWorld(
+          Offset(size.width + cullMargin, size.height + cullMargin),
+        ),
+      ).shift(-pathSet.origin);
+      final clip = canvas.getLocalClipBounds();
+      if (clip.isFinite) visible = visible.intersect(clip);
       for (final batch in pathSet.batches) {
         final worldStrokeWidth = batch.strokeWidth > 0
             ? batch.strokeWidth
             : 1.15 * inverseScale;
+        if (!debugDrawAllCells &&
+            !batch.bounds
+                .inflate(worldStrokeWidth + inverseScale * 2)
+                .overlaps(visible)) {
+          continue;
+        }
         final dashed =
-            batch.dashedPath != null &&
+            batch.pattern.isNotEmpty &&
             batch.dashPeriod * transform.scale >= _cadMinimumDashPeriodPixels;
         canvas.drawPath(
           dashed ? batch.dashedPath! : batch.path,
@@ -1079,7 +1555,10 @@ class CadScenePainter extends CustomPainter {
       }
       canvas.restore();
 
-      for (final entity in part.entities) {
+      // Paths already contain all ordinary geometry. Camera/measurement
+      // changes only need text, points and the selected foreground entities.
+      final greek = _CadGreekText();
+      for (final entity in part.foreground(selectedIds)) {
         if (!(visibleLayers[entity['layer_id'] as int] ?? true)) continue;
         final geometry = entity['geometry'] as Map<String, dynamic>;
         final kind = geometry['kind'];
@@ -1124,6 +1603,26 @@ class CadScenePainter extends CustomPainter {
             final value = geometry['value'] as String;
             final screenHeight =
                 (geometry['height'] as num).toDouble().abs() * transform.scale;
+            if (!selected) {
+              // Measured bounds, not the nominal height: fitted labels are
+              // stretched, and rotation only widens the box.
+              final world = _textWorldBounds[geometry] ??= cadTextWorldBounds(
+                geometry,
+              );
+              final box = Rect.fromPoints(
+                transform.worldToScreen(world.topLeft),
+                transform.worldToScreen(world.bottomRight),
+              );
+              if (box.shortestSide < _cadGreekTextPixels) {
+                greek.add(
+                  box,
+                  (geometry['rotation'] as num?)?.toDouble() ?? 0,
+                  multiline: value.contains('\n'),
+                  color: cadCanvasColor(entity['color_argb'] as int),
+                );
+                continue;
+              }
+            }
             const fontSize = _cadTextShapeSize;
             final shxOptions = cadShxTextOptions(geometry);
             final fontFamily = shxOptions.family;
@@ -1257,6 +1756,7 @@ class CadScenePainter extends CustomPainter {
             canvas.restore();
         }
       }
+      greek.paint(canvas);
     }
 
     for (final annotation in annotations.where((item) => !item.is3D)) {
@@ -1560,44 +2060,122 @@ class CadScenePainter extends CustomPainter {
     }
   }
 
-  List<_CadPaintPart> _buildPaintParts(
+  /// Builds [document]'s retained world paths in slices of about
+  /// [sliceBudget], yielding to the event loop between slices, so a large
+  /// viewport can be prepared before it is shown without one long frame.
+  /// A paint of the same document in the meantime builds synchronously and
+  /// this preparation is dropped.
+  static Future<void> prepareDocument(
+    CadDocumentModel document, {
+    Duration sliceBudget = const Duration(milliseconds: 6),
+  }) async {
+    if (document.sceneKind != 'two_d' || _worldPathCache[document] != null) {
+      return;
+    }
+    final visibleLayers = {
+      for (final layer in document.layers) layer.id.toInt(): layer.visible,
+    };
+    final watch = Stopwatch()..start();
+    // Lets frames and input run once the current slice is used up.
+    Future<void> nextSlice() async {
+      await Future<void>.delayed(Duration.zero);
+      watch.reset();
+    }
+
+    List<_CadPaintPart>? parts;
+    bool due() => watch.elapsed >= sliceBudget;
+    for (final step in _paintPartSteps(document, visibleLayers, due)) {
+      if (_worldPathCache[document] != null) return;
+      if (step != null) {
+        parts = step;
+        break;
+      }
+      await nextSlice();
+    }
+    if (parts == null) return;
+    // Path bounds are computed once and cached by the engine; do it here
+    // instead of when the first frame's picture is recorded.
+    for (final part in parts) {
+      for (final batch in part.paths.batches) {
+        batch.bounds;
+        if (watch.elapsed >= sliceBudget) await nextSlice();
+      }
+    }
+    if (_worldPathCache[document] != null) return;
+    _worldPathCache[document] = parts;
+    // Label bounds need shaped text; measure them now rather than on the
+    // first frame that tests their visibility.
+    for (final part in parts) {
+      for (final entity in part.foreground(const {})) {
+        final geometry = entity['geometry'] as Map<String, dynamic>;
+        if (geometry['kind'] == 'text') {
+          _textWorldBounds[geometry] ??= cadTextWorldBounds(geometry);
+          if (watch.elapsed >= sliceBudget) await nextSlice();
+        }
+      }
+    }
+  }
+
+  /// Paint parts of [source]: null after each slice of work, then the parts.
+  static Iterable<List<_CadPaintPart>?> _paintPartSteps(
     CadDocumentModel source,
-    Map<int, bool> visibleLayers,
-  ) {
+    Map<int, bool> visibleLayers, [
+    bool Function() due = _cadNeverDue,
+  ]) sync* {
     // Keep the fast globally batched path for undecorated drawings. A mask is
     // an ordering barrier: later geometry must not be hidden merely because
     // all text was previously painted in a final foreground pass. Cache the
     // segments once, not new paths or paragraphs on every camera change.
     final entities = source.entities;
-    final decorated = entities.any(
-      (entity) =>
-          (visibleLayers[entity['layer_id'] as int] ?? true) &&
-          (entity['geometry'] as Map)['background'] != null,
-    );
+    final decorated = entities is CadPackedEntities
+        ? entities.hasVisibleMasks(visibleLayers)
+        : entities.any(
+            (entity) =>
+                (visibleLayers[entity['layer_id'] as int] ?? true) &&
+                (entity['geometry'] as Map)['background'] != null,
+          );
     if (!decorated) {
-      return [
-        _CadPaintPart(
-          _buildWorldPathSet(source, visibleLayers, entities),
-          entities,
-        ),
-      ];
+      _CadWorldPathSet? paths;
+      for (final step in _worldPathSetSteps(
+        source,
+        visibleLayers,
+        entities,
+        due,
+      )) {
+        if (step == null) {
+          yield null;
+        } else {
+          paths = step;
+        }
+      }
+      yield [_CadPaintPart(paths!, entities)];
+      return;
     }
     final parts = <_CadPaintPart>[];
     var start = 0;
     var hasLabels = false;
     for (var i = 0; i < entities.length; i++) {
+      if (i % _cadPathSliceEntities == 0 && due()) yield null;
       final entity = entities[i];
       if (!(visibleLayers[entity['layer_id'] as int] ?? true)) continue;
       final kind = (entity['geometry'] as Map)['kind'];
       final label = kind == 'text' || kind == 'point';
       if (!label && hasLabels) {
         final section = entities.sublist(start, i);
-        parts.add(
-          _CadPaintPart(
-            _buildWorldPathSet(source, visibleLayers, section),
-            section,
-          ),
-        );
+        _CadWorldPathSet? paths;
+        for (final step in _worldPathSetSteps(
+          source,
+          visibleLayers,
+          section,
+          due,
+        )) {
+          if (step == null) {
+            yield null;
+          } else {
+            paths = step;
+          }
+        }
+        parts.add(_CadPaintPart(paths!, section));
         start = i;
         hasLabels = false;
       }
@@ -1605,31 +2183,140 @@ class CadScenePainter extends CustomPainter {
     }
     if (start < entities.length) {
       final section = entities.sublist(start);
-      parts.add(
-        _CadPaintPart(
-          _buildWorldPathSet(source, visibleLayers, section),
-          section,
-        ),
-      );
+      _CadWorldPathSet? paths;
+      for (final step in _worldPathSetSteps(
+        source,
+        visibleLayers,
+        section,
+        due,
+      )) {
+        if (step == null) {
+          yield null;
+        } else {
+          paths = step;
+        }
+      }
+      parts.add(_CadPaintPart(paths!, section));
     }
-    return parts;
+    yield parts;
   }
 
-  _CadWorldPathSet _buildWorldPathSet(
+  /// World paths of [entities]: null after each slice of work, then the set.
+  static Iterable<_CadWorldPathSet?> _worldPathSetSteps(
     CadDocumentModel source,
     Map<int, bool> visibleLayers,
-    List<Map<String, dynamic>> entities,
-  ) {
+    List<Map<String, dynamic>> entities, [
+    bool Function() due = _cadNeverDue,
+  ]) sync* {
     final origin = source.bounds2D?.center ?? Offset.zero;
-    final paths = <(int, double, bool, String), Path>{};
-    final dashedPaths = <(int, double, bool, String), Path>{};
-    final dashPeriods = <(int, double, bool, String), double>{};
+    final paths = <(int, double, bool, String, int), Path>{};
+    final patterns = <(int, double, bool, String, int), List<double>>{};
     Offset localPoint(dynamic value) => _point(value) - origin;
 
-    for (final entity in entities) {
-      if (!(visibleLayers[entity['layer_id'] as int] ?? true)) continue;
+    // Grid cell of an entity, from its first point (bounds come from the
+    // finished paths, so an entity reaching into other cells is still drawn
+    // whenever its own cell's path is visible).
+    final extent = source.bounds2D;
+    final grid =
+        debugChunkGrid ??
+        (entities.length >= _cadChunkMinimumEntities &&
+                extent != null &&
+                extent.width > 0 &&
+                extent.height > 0
+            ? _cadChunkGrid
+            : 1);
+    int chunkOf(double x, double y) {
+      if (grid == 1 || extent == null || !x.isFinite || !y.isFinite) return 0;
+      final column = ((x - extent.left) / extent.width * grid).floor();
+      final row = ((y - extent.top) / extent.height * grid).floor();
+      return row.clamp(0, grid - 1) * grid + column.clamp(0, grid - 1);
+    }
+
+    final packed = entities is CadPackedEntities ? entities : null;
+    final solidLinePaths = Map<Map<String, dynamic>, List<Path?>>.identity();
+    final foreground = <int>[];
+    for (var index = 0; index < entities.length; index++) {
+      if (index % _cadPathSliceEntities == 0 && index > 0 && due()) {
+        yield null;
+      }
+      // Exact solid lines can go straight from f64 records into the same
+      // world path, avoiding four temporary maps per line in dense drawings.
+      // Dash shaping and all other geometry retain the established path.
+      // Undashed lines, polylines, circles and arcs likewise, which also
+      // keeps garbage (and collection pauses) low while building.
+      final packedKind = packed?.kindAt(index) ?? 0;
+      if (packed != null && packedKind >= 2 && packedKind <= 5) {
+        if (!(visibleLayers[packed.layerAt(index)] ?? true)) continue;
+        final style = packed.styleAt(index);
+        if ((style['dash'] as List?)?.isNotEmpty != true) {
+          final chunk = packed.coordinateCountAt(index) < 2
+              ? 0
+              : chunkOf(
+                  packed.coordinateAt(index, 0),
+                  packed.coordinateAt(index, 1),
+                );
+          final chunks = solidLinePaths.putIfAbsent(
+            style,
+            () => List<Path?>.filled(grid * grid, null),
+          );
+          final path = chunks[chunk] ??= paths.putIfAbsent((
+            style['color_argb'] as int,
+            (style['stroke_width'] as double).abs(),
+            style['filled'] as bool,
+            '',
+            chunk,
+          ), Path.new);
+          double x(int component) =>
+              packed.coordinateAt(index, component) - origin.dx;
+          double y(int component) =>
+              packed.coordinateAt(index, component) - origin.dy;
+          switch (packedKind) {
+            case 2:
+              path
+                ..moveTo(x(0), y(1))
+                ..lineTo(x(2), y(3));
+            case 3:
+              final count = packed.coordinateCountAt(index);
+              if (count < 2) continue;
+              path.moveTo(x(0), y(1));
+              for (var component = 2; component + 1 < count; component += 2) {
+                path.lineTo(x(component), y(component + 1));
+              }
+              if (packed.closedAt(index)) path.close();
+            case 4:
+              path.addOval(
+                Rect.fromCircle(
+                  center: Offset(x(0), y(1)),
+                  radius: packed.coordinateAt(index, 2),
+                ),
+              );
+            case 5:
+              final start = packed.coordinateAt(index, 3);
+              var sweep = packed.coordinateAt(index, 4) - start;
+              if (sweep <= 0) sweep += math.pi * 2;
+              path.addArc(
+                Rect.fromCircle(
+                  center: Offset(x(0), y(1)),
+                  radius: packed.coordinateAt(index, 2),
+                ),
+                start,
+                sweep,
+              );
+          }
+          continue;
+        }
+      }
+      final entity = entities[index];
       final geometry = entity['geometry'] as Map<String, dynamic>;
-      if (geometry['kind'] == 'text' || geometry['kind'] == 'point') continue;
+      final kind = geometry['kind'];
+      if (packed != null
+          ? packed.kindAt(index) <=
+                1 // full text fallback or point
+          : kind == 'text' || kind == 'point') {
+        foreground.add(index);
+      }
+      if (!(visibleLayers[entity['layer_id'] as int] ?? true)) continue;
+      if (kind == 'text' || kind == 'point') continue;
       final colorArgb = entity['color_argb'] as int;
       final strokeWidth =
           (entity['stroke_width'] as num?)?.toDouble().abs() ?? 0.0;
@@ -1639,10 +2326,22 @@ class CadScenePainter extends CustomPainter {
           : ((entity['dash'] as List<dynamic>?) ?? const [])
                 .map((value) => (value as num).toDouble())
                 .toList(growable: false);
-      final key = (colorArgb, strokeWidth, filled, pattern.join(','));
-      final batchPath = paths.putIfAbsent(key, Path.new);
-      // Dashed entities are shaped on their own so each starts its pattern.
-      final path = pattern.isEmpty ? batchPath : Path();
+      final anchor = switch (kind) {
+        'line' => geometry['start'],
+        'polyline' => (geometry['points'] as List).firstOrNull,
+        'circle' || 'arc' => geometry['center'],
+        _ => null,
+      };
+      final world = anchor == null ? null : _point(anchor);
+      final key = (
+        colorArgb,
+        strokeWidth,
+        filled,
+        pattern.join(','),
+        world == null ? 0 : chunkOf(world.dx, world.dy),
+      );
+      final path = paths.putIfAbsent(key, Path.new);
+      if (pattern.isNotEmpty) patterns[key] = pattern;
       switch (geometry['kind']) {
         case 'line':
           final start = localPoint(geometry['start']);
@@ -1681,28 +2380,34 @@ class CadScenePainter extends CustomPainter {
             sweep,
           );
       }
-      if (pattern.isNotEmpty) {
-        batchPath.addPath(path, Offset.zero);
-        dashedPaths
-            .putIfAbsent(key, Path.new)
-            .addPath(cadDashPath(path, pattern), Offset.zero);
-        dashPeriods[key] = pattern.fold<double>(
-          0,
-          (sum, value) => sum + value.abs(),
-        );
-      }
     }
-    return _CadWorldPathSet(
+    // Styles keep the order they had as single paths; a style's cells follow
+    // each other, so overlapping colors stack exactly as without cells.
+    final styleOrder = <(int, double, bool, String), int>{};
+    for (final key in paths.keys) {
+      styleOrder.putIfAbsent((
+        key.$1,
+        key.$2,
+        key.$3,
+        key.$4,
+      ), () => styleOrder.length);
+    }
+    final ordered = paths.entries.toList()
+      ..sort(
+        (a, b) => styleOrder[(a.key.$1, a.key.$2, a.key.$3, a.key.$4)]!
+            .compareTo(styleOrder[(b.key.$1, b.key.$2, b.key.$3, b.key.$4)]!),
+      );
+    yield _CadWorldPathSet(
       origin: origin,
-      batches: paths.entries
+      foreground: foreground,
+      batches: ordered
           .map(
             (entry) => _CadWorldPathBatch(
               colorArgb: entry.key.$1,
               strokeWidth: entry.key.$2,
               filled: entry.key.$3,
               path: entry.value,
-              dashedPath: dashedPaths[entry.key],
-              dashPeriod: dashPeriods[entry.key] ?? 0,
+              pattern: patterns[entry.key] ?? const [],
             ),
           )
           .toList(growable: false),
@@ -1787,32 +2492,174 @@ class CadScenePainter extends CustomPainter {
           if (measurement3DFaces[order].meshId == meshId)
             measurement3DFaces[order].triangleIndex: order,
       };
+      final cached = _meshRecordingCache[mesh];
+      if (cached != null &&
+          cached.matches(transform, size, selected, measuredFaceOrder)) {
+        canvas.drawPicture(cached.picture);
+        continue;
+      }
+      // UI/point-measurement overlays must not rerecord a million-face mesh
+      // when camera, selection and measured faces are unchanged. Retain ONE
+      // exact recording per mesh; a camera/highlight change replaces it.
+      final meshRecorder = ui.PictureRecorder();
+      final meshCanvas = Canvas(meshRecorder);
       final paint = Paint()
         ..color = selected
             ? const Color(0xffffd666)
             : const Color(0xff73dfff).withValues(alpha: 0.72)
         ..strokeWidth = selected ? 1.8 : 0.8
         ..style = PaintingStyle.stroke;
-      // Rendering may be stopped when the view is idle, but visible topology
-      // must never be stride-sampled: dropping arbitrary triangles changes the
-      // apparent model and makes selection/measurement visually misleading.
-      for (var index = 0; index + 2 < indices.length; index += 3) {
-        final measuredOrder = measuredFaceOrder[index ~/ 3];
-        final trianglePaint = measuredOrder == null
-            ? paint
-            : (Paint()
-                ..color = measuredOrder == 0
-                    ? const Color(0xffffd666)
-                    : const Color(0xff69f0ae)
-                ..strokeWidth = 3
-                ..style = PaintingStyle.stroke);
-        final a = transform.project(positions[indices[index]]);
-        final b = transform.project(positions[indices[index + 1]]);
-        final c = transform.project(positions[indices[index + 2]]);
-        canvas.drawLine(a, b, trianglePaint);
-        canvas.drawLine(b, c, trianglePaint);
-        canvas.drawLine(c, a, trianglePaint);
+      final renderIndex = mesh is CadPackedMesh ? mesh.renderIndex : null;
+      final chunkCount =
+          renderIndex?.chunkCount ??
+          ((indices.length + CadMeshRenderIndex.indicesPerChunk - 1) ~/
+              CadMeshRenderIndex.indicesPerChunk);
+      final visibleChunks = Uint8List(chunkCount);
+      var visibleCount = 0;
+      for (var chunk = 0; chunk < chunkCount; chunk++) {
+        if (renderIndex != null &&
+            renderIndex.isOutside(
+              chunk,
+              centerX: transform.center.x,
+              centerY: transform.center.y,
+              centerZ: transform.center.z,
+              rightX: transform.right.x,
+              rightY: transform.right.y,
+              rightZ: transform.right.z,
+              upX: transform.up.x,
+              upY: transform.up.y,
+              upZ: transform.up.z,
+              screenX: transform.screenCenter.dx,
+              screenY: transform.screenCenter.dy,
+              scale: transform.scale,
+              width: size.width,
+              height: size.height,
+            )) {
+          continue;
+        }
+        visibleChunks[chunk] = 1;
+        visibleCount++;
       }
+      // Dense views keep the faster linear projection. Sparse views compute
+      // each referenced vertex exactly once; no cached float32 rescaling or
+      // topology sampling is allowed. Entirely offscreen meshes do no work.
+      final sparseMesh = mesh is CadPackedMesh && visibleCount * 4 < chunkCount
+          ? mesh
+          : null;
+      final sparse = sparseMesh == null || visibleCount == 0
+          ? null
+          : _prepareSparseMesh(sparseMesh, transform, size);
+      final projected = visibleCount == 0
+          ? Float32List(0)
+          : sparse?.points ?? _projectMesh(mesh, positions, transform);
+      final clipCodes = visibleCount == 0
+          ? null
+          : sparse?.clipCodes ?? _meshClipCodes(mesh, projected, size);
+      // All three edges of EVERY potentially visible triangle, in source order.
+      // Only triangles entirely beyond the same viewport side are rejected.
+      // A bounded staging
+      // buffer replaces millions of individual platform drawing calls without
+      // sampling topology or retaining a second complete edge mesh in Dart.
+      final buffer = Float32List(4096 * 12);
+      var used = 0;
+      void flush() {
+        if (used == 0) return;
+        meshCanvas.drawRawPoints(
+          ui.PointMode.lines,
+          Float32List.sublistView(buffer, 0, used),
+          paint,
+        );
+        used = 0;
+      }
+
+      for (var chunk = 0; chunk < chunkCount; chunk++) {
+        if (visibleChunks[chunk] == 0) continue;
+        final start = chunk * CadMeshRenderIndex.indicesPerChunk;
+        final end = math.min(
+          start + CadMeshRenderIndex.indicesPerChunk,
+          indices.length,
+        );
+        for (var index = start; index + 2 < end; index += 3) {
+          final ia = indices[index],
+              ib = indices[index + 1],
+              ic = indices[index + 2];
+          if (sparse != null) {
+            _projectSparseVertex(
+              sparse,
+              sparseMesh!.coordinates,
+              ia,
+              transform,
+              size,
+            );
+            _projectSparseVertex(
+              sparse,
+              sparseMesh.coordinates,
+              ib,
+              transform,
+              size,
+            );
+            _projectSparseVertex(
+              sparse,
+              sparseMesh.coordinates,
+              ic,
+              transform,
+              size,
+            );
+          }
+          if (clipCodes != null &&
+              (clipCodes[ia] & clipCodes[ib] & clipCodes[ic]) != 0) {
+            continue;
+          }
+          final measuredOrder = measuredFaceOrder.isEmpty
+              ? null
+              : measuredFaceOrder[index ~/ 3];
+          final a = ia * 2;
+          final b = ib * 2;
+          final c = ic * 2;
+          if (measuredOrder != null) {
+            flush();
+            final trianglePaint = Paint()
+              ..color = measuredOrder == 0
+                  ? const Color(0xffffd666)
+                  : const Color(0xff69f0ae)
+              ..strokeWidth = 3
+              ..style = PaintingStyle.stroke;
+            final first = Offset(projected[a], projected[a + 1]);
+            final second = Offset(projected[b], projected[b + 1]);
+            final third = Offset(projected[c], projected[c + 1]);
+            meshCanvas.drawLine(first, second, trianglePaint);
+            meshCanvas.drawLine(second, third, trianglePaint);
+            meshCanvas.drawLine(third, first, trianglePaint);
+            continue;
+          }
+          buffer[used++] = projected[a];
+          buffer[used++] = projected[a + 1];
+          buffer[used++] = projected[b];
+          buffer[used++] = projected[b + 1];
+          buffer[used++] = projected[b];
+          buffer[used++] = projected[b + 1];
+          buffer[used++] = projected[c];
+          buffer[used++] = projected[c + 1];
+          buffer[used++] = projected[c];
+          buffer[used++] = projected[c + 1];
+          buffer[used++] = projected[a];
+          buffer[used++] = projected[a + 1];
+          if (used == buffer.length) flush();
+        }
+      }
+      flush();
+      final picture = meshRecorder.endRecording();
+      _meshRecordingCache[mesh] = _CadMeshRecording(
+        transform,
+        size,
+        selected,
+        Map.unmodifiable(measuredFaceOrder),
+        picture,
+      );
+      // drawPicture retains the native recording in prior display lists;
+      // disposing this Dart handle does not invalidate already recorded frames.
+      cached?.picture.dispose();
+      canvas.drawPicture(picture);
     }
 
     for (final annotation in annotations.where((item) => item.is3D)) {
@@ -1976,7 +2823,7 @@ class CadScenePainter extends CustomPainter {
     canvas.drawRect(page, Paint()..color = const Color(0xfff5f5f5));
   }
 
-  Offset _point(dynamic value) {
+  static Offset _point(dynamic value) {
     final point = value as Map<String, dynamic>;
     return Offset(
       (point['x'] as num).toDouble(),
@@ -1989,7 +2836,7 @@ class CadScenePainter extends CustomPainter {
     CadViewTransform transform,
     Size size,
   ) {
-    final viewport = (Offset.zero & size).inflate(40);
+    final viewport = (Offset.zero & size).inflate(cullMargin);
     switch (geometry['kind']) {
       case 'point':
         return viewport.contains(
@@ -2016,8 +2863,14 @@ class CadScenePainter extends CustomPainter {
           Rect.fromCircle(center: center, radius: radius),
         );
       case 'text':
+        final world = _textWorldBounds[geometry] ??= cadTextWorldBounds(
+          geometry,
+        );
         return viewport.overlaps(
-          cadTextScreenBounds(geometry, transform).inflate(2),
+          Rect.fromPoints(
+            transform.worldToScreen(world.topLeft),
+            transform.worldToScreen(world.bottomRight),
+          ).inflate(2),
         );
       default:
         return true;
@@ -2127,46 +2980,56 @@ class CadScenePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CadScenePainter oldDelegate) =>
-      oldDelegate.document != document ||
-      oldDelegate.showGrid != showGrid ||
       oldDelegate.zoom != zoom ||
       oldDelegate.pan != pan ||
-      !listEquals(oldDelegate.annotations, annotations) ||
-      oldDelegate.selectedEntityId != selectedEntityId ||
-      !setEquals(oldDelegate.selectedEntityIds, selectedEntityIds) ||
-      !setEquals(oldDelegate.subtractedEntityIds, subtractedEntityIds) ||
-      !listEquals(oldDelegate.measurementPoints, measurementPoints) ||
-      !listEquals(
-        oldDelegate.measurementIntersectionPoints,
-        measurementIntersectionPoints,
-      ) ||
-      !listEquals(
-        oldDelegate.indexedMeasurementPoints,
-        indexedMeasurementPoints,
-      ) ||
-      oldDelegate.measurementCentroid != measurementCentroid ||
-      oldDelegate.measurementClosed != measurementClosed ||
-      oldDelegate.measurementRectangle != measurementRectangle ||
-      oldDelegate.measurementOrientedRectangle !=
-          measurementOrientedRectangle ||
-      oldDelegate.measurementCircle3Point != measurementCircle3Point ||
-      oldDelegate.measurementArc3Point != measurementArc3Point ||
-      oldDelegate.measurementPointLineOffset != measurementPointLineOffset ||
-      oldDelegate.measurementLineIntersection != measurementLineIntersection ||
-      oldDelegate.measurementParallelLineSpacing !=
-          measurementParallelLineSpacing ||
-      oldDelegate.measurementSegmentClearance != measurementSegmentClearance ||
-      oldDelegate.measurementMidpoint != measurementMidpoint ||
-      oldDelegate.measurementAngle != measurementAngle ||
-      oldDelegate.yaw != yaw ||
-      oldDelegate.pitch != pitch ||
-      oldDelegate.selectedMeshId != selectedMeshId ||
-      !listEquals(oldDelegate.measurement3DPoints, measurement3DPoints) ||
-      !listEquals(oldDelegate.measurement3DFaces, measurement3DFaces) ||
-      oldDelegate.measurement3DAngle != measurement3DAngle ||
-      oldDelegate.coordinateOrigin2D != coordinateOrigin2D ||
-      oldDelegate.coordinateXAxis2D != coordinateXAxis2D ||
-      oldDelegate.coordinateOrigin3D != coordinateOrigin3D;
+      !sameSceneAs(oldDelegate);
+
+  /// Whether [other] paints the same scene, ignoring the 2D camera (zoom
+  /// and pan): its picture then differs only by a scale and translation.
+  bool sameSceneAs(CadScenePainter oldDelegate) =>
+      oldDelegate.document == document &&
+      !(oldDelegate.showGrid != showGrid ||
+          oldDelegate.paintBackground != paintBackground ||
+          oldDelegate.cullMargin != cullMargin ||
+          !listEquals(oldDelegate.annotations, annotations) ||
+          oldDelegate.selectedEntityId != selectedEntityId ||
+          !setEquals(oldDelegate.selectedEntityIds, selectedEntityIds) ||
+          !setEquals(oldDelegate.subtractedEntityIds, subtractedEntityIds) ||
+          !listEquals(oldDelegate.measurementPoints, measurementPoints) ||
+          !listEquals(
+            oldDelegate.measurementIntersectionPoints,
+            measurementIntersectionPoints,
+          ) ||
+          !listEquals(
+            oldDelegate.indexedMeasurementPoints,
+            indexedMeasurementPoints,
+          ) ||
+          oldDelegate.measurementCentroid != measurementCentroid ||
+          oldDelegate.measurementClosed != measurementClosed ||
+          oldDelegate.measurementRectangle != measurementRectangle ||
+          oldDelegate.measurementOrientedRectangle !=
+              measurementOrientedRectangle ||
+          oldDelegate.measurementCircle3Point != measurementCircle3Point ||
+          oldDelegate.measurementArc3Point != measurementArc3Point ||
+          oldDelegate.measurementPointLineOffset !=
+              measurementPointLineOffset ||
+          oldDelegate.measurementLineIntersection !=
+              measurementLineIntersection ||
+          oldDelegate.measurementParallelLineSpacing !=
+              measurementParallelLineSpacing ||
+          oldDelegate.measurementSegmentClearance !=
+              measurementSegmentClearance ||
+          oldDelegate.measurementMidpoint != measurementMidpoint ||
+          oldDelegate.measurementAngle != measurementAngle ||
+          oldDelegate.yaw != yaw ||
+          oldDelegate.pitch != pitch ||
+          oldDelegate.selectedMeshId != selectedMeshId ||
+          !listEquals(oldDelegate.measurement3DPoints, measurement3DPoints) ||
+          !listEquals(oldDelegate.measurement3DFaces, measurement3DFaces) ||
+          oldDelegate.measurement3DAngle != measurement3DAngle ||
+          oldDelegate.coordinateOrigin2D != coordinateOrigin2D ||
+          oldDelegate.coordinateXAxis2D != coordinateXAxis2D ||
+          oldDelegate.coordinateOrigin3D != coordinateOrigin3D);
 }
 
 // The block owns its paragraphs. Keeping children in the same LRU as other

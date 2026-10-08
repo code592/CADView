@@ -6,7 +6,10 @@ import 'dart:ui';
 import 'package:flutter/foundation.dart';
 
 import '../features/viewer/cad_document_model.dart';
-import '../features/viewer/cad_scene_painter.dart' show cadTextWorldBounds;
+import '../features/viewer/cad_scene_packet.dart';
+import '../features/viewer/cad_mesh_packet.dart';
+import '../features/viewer/cad_scene_painter.dart'
+    show cadTextWorldBounds, CadRay3, CadMeshHit, CadPoint3;
 import '../src/rust/api/document.dart' as native;
 import 'distribution.dart';
 import 'document_name.dart';
@@ -172,6 +175,12 @@ class CadOpenCancelled implements Exception {
   const CadOpenCancelled();
 }
 
+/// Optional retained-scene 3D picker; preview/test engines can use the exact
+/// local implementation without depending on the native session protocol.
+abstract interface class CadRayPicker {
+  Future<CadMeshHit?> hitTestRay(BigInt sessionId, CadRay3 ray);
+}
+
 abstract interface class CadEngine {
   Future<List<CadFormatDescriptor>> supportedFormats();
   Future<OpenedCadDocument> openDocument(
@@ -239,7 +248,7 @@ abstract interface class CadEngine {
   Future<String> exportAnnotations(BigInt sessionId);
 }
 
-class NativeCadEngine implements CadEngine {
+class NativeCadEngine implements CadEngine, CadRayPicker {
   String? _annotationDatabasePath;
   bool _cacheConfigured = false;
   BigInt? _currentOpenTicket;
@@ -288,7 +297,7 @@ class NativeCadEngine implements CadEngine {
       _cacheConfigured = true;
     }
     _ensureOpenActive(generation);
-    final ticket = native.beginOpenDocument(path: path);
+    final ticket = native.beginOpenDocumentCompact(path: path);
     _currentOpenTicket = ticket.ticketId;
     native.OpenDocumentResponse? response;
     try {
@@ -378,12 +387,17 @@ class NativeCadEngine implements CadEngine {
         final summary = await native.finalizeTextLayout(
           sessionId: response.sessionId,
         );
-        documentMap = await compute(_decodeDocumentJson, response.documentJson);
-        final measuredMap = jsonDecode(summary) as Map<String, dynamic>;
-        final scene = documentMap['scene'] as Map<String, dynamic>;
-        final measuredScene = measuredMap['scene'] as Map<String, dynamic>;
-        (scene['scene'] as Map<String, dynamic>)['bounds'] =
-            (measuredScene['scene'] as Map<String, dynamic>)['bounds'];
+        documentMap = response.isPartial
+            ? jsonDecode(summary) as Map<String, dynamic>
+            : await compute(
+                decodeCadScenePacket,
+                await native.documentPacket(sessionId: response.sessionId),
+              );
+      } else if (response.sceneKind == 'three_d') {
+        documentMap = await compute(
+          decodeCadMeshPacket,
+          await native.documentPacket(sessionId: response.sessionId),
+        );
       } else {
         documentMap = await compute(_decodeDocumentJson, response.documentJson);
       }
@@ -397,7 +411,7 @@ class NativeCadEngine implements CadEngine {
         });
       }
     } catch (_) {
-      native.closeDocument(sessionId: response.sessionId);
+      await native.closeDocument(sessionId: response.sessionId);
       rethrow;
     }
     var annotationJson = '{"annotations": []}';
@@ -412,7 +426,7 @@ class NativeCadEngine implements CadEngine {
       }
     }
     if (generation != _openGeneration || _applicationBackgrounded) {
-      native.closeDocument(sessionId: response.sessionId);
+      await native.closeDocument(sessionId: response.sessionId);
       throw const CadOpenCancelled();
     }
     onEvent?.call(
@@ -459,15 +473,36 @@ class NativeCadEngine implements CadEngine {
     BigInt sessionId,
     Rect worldBounds,
   ) async {
-    final json = await native.viewportDocument(
+    final packet = await native.viewportPacket(
       sessionId: sessionId,
       minX: worldBounds.left,
       minY: worldBounds.top,
       maxX: worldBounds.right,
       maxY: worldBounds.bottom,
     );
-    final documentMap = await compute(_decodeDocumentJson, json);
+    final documentMap = await compute(decodeCadScenePacket, packet);
     return CadDocumentModel.fromJson(documentMap);
+  }
+
+  @override
+  Future<CadMeshHit?> hitTestRay(BigInt sessionId, CadRay3 ray) async {
+    final hit = await native.hitTestRay(
+      sessionId: sessionId,
+      ox: ray.origin.x,
+      oy: ray.origin.y,
+      oz: ray.origin.z,
+      dx: ray.direction.x,
+      dy: ray.direction.y,
+      dz: ray.direction.z,
+    );
+    return hit == null
+        ? null
+        : CadMeshHit(
+            meshId: hit.meshId,
+            triangleIndex: hit.triangleIndex.toInt(),
+            position: CadPoint3(hit.x, hit.y, hit.z),
+            distance: hit.distance,
+          );
   }
 
   @override
@@ -482,7 +517,7 @@ class NativeCadEngine implements CadEngine {
         // Closing the native document remains best-effort if persistence fails.
       }
     }
-    native.closeDocument(sessionId: sessionId);
+    await native.closeDocument(sessionId: sessionId);
   }
 
   @override
@@ -526,7 +561,7 @@ class NativeCadEngine implements CadEngine {
     double y,
     double tolerance,
   ) async {
-    final hit = native.hitTest(
+    final hit = await native.hitTest(
       sessionId: sessionId,
       x: x,
       y: y,
@@ -548,7 +583,7 @@ class NativeCadEngine implements CadEngine {
     double y,
     double tolerance,
   ) async {
-    final result = native.snap(
+    final result = await native.snap(
       sessionId: sessionId,
       x: x,
       y: y,
@@ -570,7 +605,7 @@ class NativeCadEngine implements CadEngine {
     double y,
     double tolerance,
   ) async {
-    final result = native.snapIntersection(
+    final result = await native.snapIntersection(
       sessionId: sessionId,
       x: x,
       y: y,

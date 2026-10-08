@@ -1,6 +1,7 @@
 //! Affine transforms of normalized 2D scene geometry, used to expand block
 //! references after each child has been normalized in block coordinates.
 
+use cad_core::TextGeometry2D;
 use cad_core::{Entity2DGeometry, Point2, TextPlane2D};
 use std::f64::consts::{PI, TAU};
 
@@ -177,30 +178,31 @@ pub(crate) fn transform_geometry(
                 }
             }
         },
-        Entity2DGeometry::Text {
-            origin,
-            value,
-            height,
-            height_reference,
-            rotation,
-            width_factor,
-            oblique_angle,
-            horizontal_alignment,
-            vertical_alignment,
-            target_width,
-            uniform_fit,
-            wrap_width,
-            line_spacing,
-            columns,
-            background,
-            mirrored_x,
-            mirrored_y,
-            font_family,
-            shx,
-            plane,
-            text_runs,
-            text_warnings,
-        } => {
+        Entity2DGeometry::Text(text_geometry) => {
+            let TextGeometry2D {
+                origin,
+                value,
+                height,
+                height_reference,
+                rotation,
+                width_factor,
+                oblique_angle,
+                horizontal_alignment,
+                vertical_alignment,
+                target_width,
+                uniform_fit,
+                wrap_width,
+                line_spacing,
+                columns,
+                background,
+                mirrored_x,
+                mirrored_y,
+                font_family,
+                shx,
+                plane,
+                text_runs,
+                text_warnings,
+            } = *text_geometry;
             // The painter places glyphs at origin + plane · R(rotation) · local.
             let p = plane.unwrap_or(TextPlane2D {
                 xx: 1.0,
@@ -218,7 +220,7 @@ pub(crate) fn transform_geometry(
                 && composed.xy == 0.0
                 && composed.yx == 0.0
                 && composed.yy == 1.0;
-            Entity2DGeometry::Text {
+            Entity2DGeometry::Text(Box::new(TextGeometry2D {
                 origin: transform.apply(origin),
                 value,
                 height,
@@ -241,7 +243,7 @@ pub(crate) fn transform_geometry(
                 plane: (!identity).then_some(composed),
                 text_runs,
                 text_warnings,
-            }
+            }))
         }
     };
     Some(result)

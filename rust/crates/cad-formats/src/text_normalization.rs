@@ -1,3 +1,4 @@
+use cad_core::TextGeometry2D;
 use cad_core::{TextRun2D, TextStyle2D};
 use std::collections::BTreeSet;
 
@@ -157,7 +158,8 @@ pub(crate) fn append_text_diagnostics(
 ) {
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();
     for entity in &scene.entities {
-        if let cad_core::Entity2DGeometry::Text { text_warnings, .. } = &entity.geometry {
+        if let cad_core::Entity2DGeometry::Text(text_geometry) = &entity.geometry {
+            let TextGeometry2D { text_warnings, .. } = &**text_geometry;
             for warning in text_warnings {
                 *counts.entry(warning).or_default() += 1;
             }
@@ -201,12 +203,15 @@ fn cad_special_symbol(character: char) -> char {
 /// `^` as the HPB300 rebar symbol and `*` as a multiplication sign.
 pub(crate) fn apply_shx_symbol_maps(entities: &mut [cad_core::Entity2D]) {
     for entity in entities {
-        if let cad_core::Entity2DGeometry::Text {
-            value,
-            shx: Some(shx),
-            ..
-        } = &mut entity.geometry
-        {
+        if let cad_core::Entity2DGeometry::Text(text) = &mut entity.geometry {
+            let TextGeometry2D {
+                value,
+                shx: Some(shx),
+                ..
+            } = &mut **text
+            else {
+                continue;
+            };
             if shx.font.as_deref() == Some("ebgen.shx") && value.contains(['^', '*']) {
                 // All are one UTF-16 unit, so style-run offsets stay valid.
                 *value = value.replace('^', "\u{e130}").replace('*', "×");

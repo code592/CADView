@@ -29,6 +29,16 @@ impl Iterator for EntityIter<'_> {
 }
 
 impl EntityIter<'_> {
+    pub(crate) fn read_entities_into_sink(
+        &mut self,
+        sink: &mut dyn FnMut(Entity) -> DxfResult<()>,
+    ) -> DxfResult<()> {
+        let result = collect_entities_with_sink(self, sink);
+        match self.failure.take() {
+            Some(error) => Err(error),
+            None => result,
+        }
+    }
     pub(crate) fn read_entities_into_vec(&mut self, entities: &mut Vec<Entity>) -> DxfResult<()> {
         let result = collect_entities(self, entities);
         match self.failure.take() {
@@ -39,6 +49,19 @@ impl EntityIter<'_> {
 }
 
 pub(crate) fn collect_entities<I>(iter: &mut I, entities: &mut Vec<Entity>) -> DxfResult<()>
+where
+    I: Iterator<Item = Entity>,
+{
+    collect_entities_with_sink(iter, &mut |entity| {
+        entities.push(entity);
+        Ok(())
+    })
+}
+
+fn collect_entities_with_sink<I>(
+    iter: &mut I,
+    sink: &mut dyn FnMut(Entity) -> DxfResult<()>,
+) -> DxfResult<()>
 where
     I: Iterator<Item = Entity>,
 {
@@ -93,10 +116,10 @@ where
                     Err(e) => return Err(e),
                 }
 
-                entities.push(Entity {
+                sink(Entity {
                     common: common.clone(), // 18 fields
                     specific: EntityType::Attribute(att),
-                });
+                })?;
             }
             Some(Entity {
                 ref common,
@@ -109,10 +132,10 @@ where
                     Err(e) => return Err(e),
                 }
 
-                entities.push(Entity {
+                sink(Entity {
                     common: common.clone(), // 18 fields
                     specific: EntityType::AttributeDefinition(att),
-                });
+                })?;
             }
             Some(Entity {
                 ref common,
@@ -139,10 +162,10 @@ where
                 swallow_seqend(&mut iter)?;
 
                 // and finally keep the INSERT
-                entities.push(Entity {
+                sink(Entity {
                     common: common.clone(), // 18 fields
                     specific: EntityType::Insert(ins),
-                });
+                })?;
             }
             Some(Entity {
                 common,
@@ -169,12 +192,12 @@ where
                 swallow_seqend(&mut iter)?;
 
                 // and finally keep the POLYLINE
-                entities.push(Entity {
+                sink(Entity {
                     common: common.clone(), // 18 fields
                     specific: EntityType::Polyline(poly),
-                });
+                })?;
             }
-            Some(entity) => entities.push(entity),
+            Some(entity) => sink(entity)?,
             None => break,
         }
     }

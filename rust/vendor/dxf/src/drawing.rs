@@ -142,12 +142,37 @@ impl Drawing {
             reader, encoding, first_line,
         )?))
     }
+    /// CADView: retain headers/tables/blocks but deliver assembled model/paper
+    /// entities one at a time. INSERT attributes and POLYLINE vertices use the
+    /// very same collector as load_with_encoding; no simplified CAD parser.
+    /// DXB remains on the ordinary loader, which has its own reader.
+    pub fn load_with_entity_sink<T>(
+        reader: &mut T,
+        encoding: &'static Encoding,
+        sink: &mut dyn FnMut(Entity) -> DxfResult<()>,
+    ) -> DxfResult<Drawing>
+    where
+        T: Read + ?Sized,
+    {
+        let first_line = read_line(reader, true, encoding)?;
+        if first_line == "AutoCAD DXB 1.0" {
+            return Err(DxfError::UnexpectedEndOfInput);
+        }
+        let iter = new_code_pair_iter_from_reader(reader, encoding, first_line)?;
+        Drawing::load_from_iter_with_sink(iter, Some(sink))
+    }
     /// Loads a `Drawing` from the specified `CodePairIter`.
     pub(crate) fn load_from_iter(iter: Box<dyn CodePairIter>) -> DxfResult<Drawing> {
+        Drawing::load_from_iter_with_sink(iter, None)
+    }
+    fn load_from_iter_with_sink(
+        iter: Box<dyn CodePairIter>,
+        sink: Option<&mut dyn FnMut(Entity) -> DxfResult<()>>,
+    ) -> DxfResult<Drawing> {
         let mut drawing = Drawing::new();
         drawing.clear();
         let mut iter = CodePairPutBack::from_code_pair_iter(iter);
-        Drawing::read_sections(&mut drawing, &mut iter)?;
+        Drawing::read_sections(&mut drawing, &mut iter, sink)?;
         match iter.next() {
             Some(Ok(CodePair {
                 code: 0,
@@ -987,7 +1012,11 @@ impl Drawing {
         }
         Ok(())
     }
-    fn read_sections(drawing: &mut Drawing, iter: &mut CodePairPutBack) -> DxfResult<()> {
+    fn read_sections(
+        drawing: &mut Drawing,
+        iter: &mut CodePairPutBack,
+        mut sink: Option<&mut dyn FnMut(Entity) -> DxfResult<()>>,
+    ) -> DxfResult<()> {
         loop {
             match iter.next() {
                 Some(Ok(pair @ CodePair { code: 0, .. })) => match &*pair.assert_string()? {
@@ -1010,7 +1039,10 @@ impl Drawing {
                                 "BLOCKS" => {
                                     drawing.read_section_item(iter, "BLOCK", Block::read_block)?
                                 }
-                                "ENTITIES" => drawing.read_entities(iter)?,
+                                "ENTITIES" => match sink.as_mut() {
+                                    Some(sink) => drawing.read_entities_into_sink(iter, *sink)?,
+                                    None => drawing.read_entities(iter)?,
+                                },
                                 "OBJECTS" => drawing.read_objects(iter)?,
                                 "THUMBNAILIMAGE" => {
                                     drawing.thumbnail = thumbnail::read_thumbnail(iter)?;
@@ -1094,6 +1126,26 @@ impl Drawing {
             }
         }
         Ok(())
+    }
+    fn read_entities_into_sink(
+        &mut self,
+        iter: &mut CodePairPutBack,
+        sink: &mut dyn FnMut(Entity) -> DxfResult<()>,
+    ) -> DxfResult<()> {
+        let mut iter = EntityIter {
+            iter,
+            failure: None,
+        };
+        iter.read_entities_into_sink(&mut |entity| {
+            // Preserve normal handle/reference/default-table behavior, but
+            // retain only this one assembled entity before delivering it.
+            if entity.common.handle.is_empty() {
+                self.add_entity(entity);
+            } else {
+                self.add_entity_no_handle_set(entity);
+            }
+            sink(self.__entities.pop().unwrap())
+        })
     }
     fn read_objects(&mut self, iter: &mut CodePairPutBack) -> DxfResult<()> {
         let iter = put_back(ObjectIter { iter });

@@ -8,6 +8,19 @@ The original registry package checksum is
 
 Local changes:
 
+- Buffer ASCII code-pair input in 64 KiB spans and reuse the line byte buffer.
+  Codes and numeric values borrow that buffer instead of allocating strings;
+  string values become owned before reading the next line.
+  ASCII-compatible code pages use the exact ASCII fast path; non-ASCII values
+  still use the declared decoder and preserve malformed-string errors. Numeric
+  parse error types, line offsets, UTF-8 BOMs and CRLF semantics are retained.
+- Expose `Drawing::load_with_entity_sink`: headers, tables and block definitions
+  are retained, but assembled model/paper entities are delivered individually.
+  It shares the original INSERT/attribute and POLYLINE/vertex collector, handle
+  assignment, table defaults and error propagation. The application uses two
+  passes for inputs ≥8 MiB (excluding DXB), so late sections cannot change the
+  normalization result. All smaller drawings use the original retained loader.
+
 - Decode binary NUL-terminated string bytes with the declared encoding instead
   of casting each byte to a Unicode character. Track byte offsets before decoding.
 - Honor the header's `$DWGCODEPAGE` for legacy ASCII and binary files; R2007+

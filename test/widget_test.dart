@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:cad_view/app/cad_view_app.dart';
 import 'package:cad_view/core/cad_engine.dart';
@@ -8,6 +9,7 @@ import 'package:cad_view/core/recent_files.dart';
 import 'package:cad_view/features/viewer/cad_document_model.dart';
 import 'package:cad_view/features/viewer/cad_entity_metrics.dart';
 import 'package:cad_view/features/viewer/cad_scene_painter.dart';
+import 'package:cad_view/features/viewer/cad_scene_snapshot.dart';
 import 'package:cad_view/features/viewer/cad_viewer_page.dart';
 import 'package:cad_view/l10n/app_localizations.dart';
 import 'package:flutter/material.dart';
@@ -24,6 +26,282 @@ Finder cadScenePaintFinder() => find.byWidgetPredicate(
 );
 
 void main() {
+  for (final viewport in [const Size(390, 844), const Size(1024, 768)]) {
+    testWidgets('precise touch and pen picking on $viewport', (tester) async {
+      tester.view.physicalSize = viewport;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final engine = _FakeCadEngine()..snapEnabled = false;
+      await _pumpPickViewer(tester, engine);
+      final position = tester.getCenter(cadScenePaintFinder());
+      final before =
+          tester.widget<CustomPaint>(cadScenePaintFinder()).painter
+              as CadScenePainter;
+      final size = tester.getSize(cadScenePaintFinder());
+      final topLeft = tester.getTopLeft(cadScenePaintFinder());
+      final transform = CadViewTransform.forScene(
+        before.document,
+        size,
+        before.zoom,
+        before.pan,
+      );
+      final hold = await tester.startGesture(position);
+      await tester.pump(const Duration(milliseconds: 600));
+      final loupe = tester.widget<RawMagnifier>(find.byType(RawMagnifier));
+      expect(loupe.size.width, viewport.shortestSide >= 600 ? 176 : 144);
+      await hold.moveBy(const Offset(30, 15));
+      await tester.pump();
+      await hold.up();
+      await tester.pump();
+      var painter =
+          tester.widget<CustomPaint>(cadScenePaintFinder()).painter
+              as CadScenePainter;
+      expect(painter.measurementPoints, [
+        transform.screenToWorld(position - topLeft + const Offset(10, 5)),
+      ]);
+      expect(engine.snapRequests.last.$3, closeTo(6 / transform.scale, 1e-10));
+      final pen = await tester.startGesture(
+        position + const Offset(50, 20),
+        kind: ui.PointerDeviceKind.stylus,
+      );
+      await pen.up();
+      await tester.pump();
+      painter =
+          tester.widget<CustomPaint>(cadScenePaintFinder()).painter
+              as CadScenePainter;
+      expect(
+        painter.measurementPoints.last,
+        transform.screenToWorld(position - topLeft + const Offset(50, 20)),
+      );
+      expect(engine.snapRequests.last.$3, closeTo(6 / transform.scale, 1e-10));
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    });
+  }
+
+  testWidgets(
+    'slow native picks stay ordered and clear cancels a pending result',
+    (tester) async {
+      final engine = _FakeCadEngine();
+      final replies = <Completer<CadSnap?>>[];
+      engine.snapHandler = (_, _, _) {
+        final reply = Completer<CadSnap?>();
+        replies.add(reply);
+        return reply.future;
+      };
+      await _pumpPickViewer(tester, engine);
+      final position = tester.getCenter(cadScenePaintFinder());
+      CadScenePainter painter() =>
+          tester.widget<CustomPaint>(cadScenePaintFinder()).painter
+              as CadScenePainter;
+      CadSnap result(Offset point) => CadSnap(
+        entityId: BigInt.one,
+        position: point,
+        kind: 'endpoint',
+        distance: 0,
+      );
+      await tester.tapAt(position);
+      await tester.pump();
+      await tester.tapAt(position + const Offset(40, 0));
+      await tester.pump();
+      expect(replies, hasLength(1));
+      replies[0].complete(result(const Offset(1, 2)));
+      await tester.pump();
+      expect(replies, hasLength(2));
+      replies[1].complete(result(const Offset(3, 4)));
+      await tester.pumpAndSettle();
+      expect(painter().measurementPoints, const [Offset(1, 2), Offset(3, 4)]);
+
+      await tester.tapAt(position);
+      await tester.pump();
+      await tester.tap(find.byTooltip('Clear measurement'));
+      await tester.pump();
+      replies[2].complete(result(const Offset(90, 90)));
+      await tester.pump();
+      expect(painter().measurementPoints, isEmpty);
+
+      await tester.tapAt(position);
+      await tester.pump();
+      await tester.tap(find.text('View'));
+      await tester.pump();
+      replies[3].complete(result(const Offset(80, 80)));
+      await tester.pump();
+      expect(painter().measurementPoints, isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets(
+    'moving the loupe coalesces native work and commits the released position',
+    (tester) async {
+      final engine = _FakeCadEngine();
+      final replies = <Completer<CadSnap?>>[];
+      engine.snapHandler = (_, _, _) {
+        final reply = Completer<CadSnap?>();
+        replies.add(reply);
+        return reply.future;
+      };
+      await _pumpPickViewer(tester, engine);
+      final position = tester.getCenter(cadScenePaintFinder());
+      final hold = await tester.startGesture(position);
+      await tester.pump(const Duration(milliseconds: 600));
+      for (var i = 1; i <= 30; i++) {
+        await hold.moveTo(position + Offset(i.toDouble(), 0));
+        await tester.pump(const Duration(milliseconds: 8));
+      }
+      await hold.up();
+      await tester.pump();
+      expect(replies, hasLength(2));
+      await tester.tapAt(position + const Offset(50, 20));
+      await tester.pump();
+      expect(
+        replies,
+        hasLength(2),
+        reason: 'the tap must wait behind the released precise pick',
+      );
+      replies.first.complete(
+        CadSnap(
+          entityId: BigInt.one,
+          position: Offset.zero,
+          kind: 'endpoint',
+          distance: 0,
+        ),
+      );
+      await tester.pump();
+      expect(replies, hasLength(2));
+      final last = engine.snapRequests.last;
+      replies.last.complete(null);
+      await tester.pumpAndSettle();
+      final painter =
+          tester.widget<CustomPaint>(cadScenePaintFinder()).painter
+              as CadScenePainter;
+      expect(painter.measurementPoints, [Offset(last.$1, last.$2)]);
+      expect(replies, hasLength(3));
+      replies.last.complete(
+        CadSnap(
+          entityId: BigInt.one,
+          position: const Offset(90, 95),
+          kind: 'endpoint',
+          distance: 0,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final completed =
+          tester.widget<CustomPaint>(cadScenePaintFinder()).painter
+              as CadScenePainter;
+      expect(completed.measurementPoints, [
+        Offset(last.$1, last.$2),
+        const Offset(90, 95),
+      ]);
+      expect(find.byType(RawMagnifier), findsNothing);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+
+  testWidgets('2D gestures move a snapshot and release draws exactly', (
+    tester,
+  ) async {
+    final engine = _FakeCadEngine();
+    final document = CadDocumentModel.fromJson({
+      'metadata': {'format': 'dxf', 'display_name': 'gesture.dxf'},
+      'scene': {
+        'scene_kind': 'two_d',
+        'scene': {
+          'layers': [
+            {'id': 1, 'name': '0', 'visible': true, 'color_argb': 0xffffffff},
+          ],
+          'entities': [
+            for (var i = 0; i < 20; i++)
+              {
+                'id': i + 1,
+                'layer_id': 1,
+                'color_argb': 0xffff0000,
+                'stroke_width': 0.0,
+                'filled': false,
+                'geometry': {
+                  'kind': 'line',
+                  'start': {'x': i * 5.0, 'y': 0.0},
+                  'end': {'x': i * 5.0, 'y': 100.0},
+                },
+              },
+          ],
+          'bounds': {
+            'min': {'x': 0, 'y': 0},
+            'max': {'x': 100, 'y': 100},
+          },
+        },
+      },
+      'diagnostics': <Object>[],
+    });
+    engine.viewportDocument = document;
+    await tester.pumpWidget(
+      MaterialApp(
+        locale: const Locale('en'),
+        supportedLocales: AppLocalizations.supportedLocales,
+        localizationsDelegates: const [
+          AppLocalizations.delegate,
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        home: CadViewerPage(
+          engine: engine,
+          opened: OpenedCadDocument(
+            sessionId: BigInt.one,
+            formatId: 'dxf',
+            sceneKind: 'two_d',
+            displayName: 'gesture.dxf',
+            fingerprint: 'gesture-test',
+            document: document,
+            annotations: const [],
+            sourcePath: '/tmp/gesture.dxf',
+            totalEntityCount: BigInt.from(20),
+            isPartial: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    Finder snapshotPaint() => find.byWidgetPredicate(
+      (widget) => widget is CustomPaint && widget.painter is CadSnapshotPainter,
+    );
+    // Still for a moment: the scene is rendered into a snapshot.
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 200)),
+    );
+    expect(cadScenePaintFinder(), findsOneWidget);
+
+    final gesture = await tester.startGesture(
+      tester.getCenter(cadScenePaintFinder()),
+    );
+    for (var step = 0; step < 4; step++) {
+      await gesture.moveBy(const Offset(12, 4));
+      await tester.pump(const Duration(milliseconds: 16));
+    }
+    expect(snapshotPaint(), findsOneWidget);
+    expect(cadScenePaintFinder(), findsNothing);
+
+    // A pause during the gesture shows the exact scene again.
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(snapshotPaint(), findsNothing);
+    expect(cadScenePaintFinder(), findsOneWidget);
+
+    await gesture.moveBy(const Offset(12, 4));
+    await tester.pump(const Duration(milliseconds: 16));
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(snapshotPaint(), findsNothing);
+    final painter =
+        tester.widget<CustomPaint>(cadScenePaintFinder()).painter!
+            as CadScenePainter;
+    expect(painter.pan, isNot(Offset.zero));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets(
     'image export supports cancellation, save failure and retry from compact menu',
     (tester) async {
@@ -214,7 +492,8 @@ void main() {
     await tester.pumpAndSettle();
 
     Future<void> waitForSaves(int count) async {
-      for (var attempt = 0; picker.calls < count && attempt < 200; attempt++) {
+      final deadline = DateTime.now().add(const Duration(seconds: 15));
+      while (picker.calls < count && DateTime.now().isBefore(deadline)) {
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 10)),
         );
@@ -226,6 +505,11 @@ void main() {
         }
       }
       await tester.pumpAndSettle();
+      expect(
+        picker.calls,
+        count,
+        reason: 'all selected sheets must finish exporting',
+      );
     }
 
     await tester.tap(find.byKey(const ValueKey('viewer_more_actions')));
@@ -4477,7 +4761,7 @@ void main() {
           freePainter.pan,
         ).screenToWorld(
           pickPosition +
-              const Offset(7, 3) -
+              const Offset(7 / 3, 1) -
               tester.getTopLeft(cadScenePaintFinder()),
         );
     await freeHold.up();
@@ -4501,6 +4785,60 @@ void main() {
     expect(engine.snapRequests, hasLength(requestsBeforeEntityHold));
     expect(tester.takeException(), isNull);
   });
+}
+
+Future<void> _pumpPickViewer(WidgetTester tester, _FakeCadEngine engine) async {
+  final document = CadDocumentModel(
+    format: 'dxf',
+    displayName: 'pick.dxf',
+    sceneKind: 'two_d',
+    diagnostics: [],
+    scene: {
+      'layers': [
+        {'id': 1, 'name': '0', 'visible': true, 'color_argb': 0xffffffff},
+      ],
+      'entities': <Map<String, dynamic>>[],
+      'bounds': {
+        'min': {'x': 0.0, 'y': 0.0},
+        'max': {'x': 100.0, 'y': 100.0},
+      },
+    },
+  );
+  engine.viewportDocument = document;
+  await tester.pumpWidget(
+    MaterialApp(
+      locale: const Locale('en'),
+      supportedLocales: AppLocalizations.supportedLocales,
+      localizationsDelegates: const [
+        AppLocalizations.delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      home: CadViewerPage(
+        engine: engine,
+        opened: OpenedCadDocument(
+          sessionId: BigInt.one,
+          formatId: 'dxf',
+          sceneKind: 'two_d',
+          displayName: 'pick.dxf',
+          fingerprint: 'pick',
+          document: document,
+          annotations: const [],
+          sourcePath: '/tmp/pick.dxf',
+          totalEntityCount: BigInt.zero,
+          isPartial: false,
+        ),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+  await tester.tapAt(tester.getCenter(cadScenePaintFinder()));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Measure'));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Distance'));
+  await tester.pumpAndSettle();
 }
 
 class _InMemoryRecentFilesStore extends RecentFilesStore {
@@ -4550,6 +4888,7 @@ class _FakeCadEngine implements CadEngine {
   Offset? snapPositionOverride;
   String snapKind = 'intersection';
   bool snapEnabled = true;
+  Future<CadSnap?> Function(double, double, double)? snapHandler;
   final List<Map<BigInt, bool>> visibilityBatches = [];
   final List<BigInt> entityCountRequests = [];
   CadHit? hitResult;
@@ -4683,6 +5022,7 @@ class _FakeCadEngine implements CadEngine {
     double tolerance,
   ) async {
     snapRequests.add((x, y, tolerance));
+    if (snapHandler != null) return snapHandler!(x, y, tolerance);
     if (!snapEnabled) return null;
     return CadSnap(
       entityId: BigInt.one,

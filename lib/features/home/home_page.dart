@@ -14,6 +14,7 @@ import '../../core/native_paths.dart';
 import '../../core/privacy_preferences.dart';
 import '../../core/recent_files.dart';
 import '../../l10n/app_localizations.dart';
+import '../viewer/cad_scene_painter.dart';
 import '../viewer/cad_viewer_page.dart';
 
 class HomePage extends StatefulWidget {
@@ -476,6 +477,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           });
         },
       );
+      if (!mounted) return;
+      // Build the drawing's paths between frames while the progress is still
+      // shown, so the viewer's first frame does not do it all at once.
+      await CadScenePainter.prepareDocument(document.document);
       if (!mounted) return;
       try {
         final recentFiles = await widget.recentFiles.record(
